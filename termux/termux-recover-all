@@ -1,0 +1,194 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -u
+HOME="/data/data/com.termux/files/home"
+PREFIX="/data/data/com.termux/files/usr"
+PATH="$PREFIX/bin:$PATH"
+SVDIR="$PREFIX/var/service"
+STATE_DIR="$HOME/.termux-watchdog"
+LOG="$STATE_DIR/recovery.log"
+LOCK="$STATE_DIR/recovery.lock"
+mkdir -p "$STATE_DIR"
+exec 9>"$LOCK"
+if ! flock -n 9; then
+  printf '%s recovery already active\n' "$(date -Iseconds)" >>"$LOG"
+  exit 75
+fi
+log() { printf '%s %s\n' "$(date -Iseconds)" "$*" | tee -a "$LOG"; }
+service_running() {
+  local svc="$1" out
+  out="$(sv status "$SVDIR/$svc" 2>&1 || true)"
+  case "$out" in run:*) return 0 ;; *) return 1 ;; esac
+}
+ensure_service() {
+  local svc="$1"
+  if [ ! -d "$SVDIR/$svc" ]; then
+    log "service missing: $svc"
+    return 1
+  fi
+  if service_running "$svc"; then
+    log "service healthy: $svc"
+    return 0
+  fi
+  log "service up: $svc"
+  sv up "$SVDIR/$svc" >/dev/null 2>&1 || true
+  sleep 1
+  service_running "$svc"
+}
+local_mcp_records() {
+  python - "$HOME/.drive-worker/mcp-servers.json" <<'PY_MCP'
+import json, sys
+from urllib.parse import urlparse
+p=sys.argv[1]
+try:
+    d=json.load(open(p, encoding='utf-8'))
+except Exception:
+    print('__REGISTRY_ERROR__|')
+    raise SystemExit(0)
+servers=d.get('servers', d) if isinstance(d, dict) else {}
+if not isinstance(servers, dict):
+    print('__REGISTRY_ERROR__|')
+    raise SystemExit(0)
+for _name, cfg in servers.items():
+    if not isinstance(cfg, dict):
+        continue
+    mode=cfg.get('connection_mode') or cfg.get('deployment_mode')
+    if mode not in ('local-selfhost','user_owned_local'):
+        continue
+    svc=cfg.get('service')
+    if not isinstance(svc, str) or not svc:
+        continue
+    port=cfg.get('local_port')
+    if not isinstance(port, int):
+        endpoint=cfg.get('endpoint') or cfg.get('url') or cfg.get('mcp_url')
+        if isinstance(endpoint, str):
+            try:
+                parsed=urlparse(endpoint)
+                port=parsed.port
+            except Exception:
+                port=None
+    print(f'{svc}|{port or ""}')
+PY_MCP
+}
+check_tcp_port() {
+  local port="$1"
+  python - "$port" <<'PY_TCP'
+import socket, sys
+p=int(sys.argv[1])
+s=socket.socket()
+s.settimeout(2.0)
+try:
+    s.connect(('127.0.0.1',p))
+except OSError:
+    raise SystemExit(1)
+finally:
+    s.close()
+PY_TCP
+}
+check_drive_health() {
+  curl -fsS --connect-timeout 2 --max-time 4 http://127.0.0.1:17841/health 2>/dev/null |
+  python -c 'import json,sys; d=json.load(sys.stdin); raise SystemExit(0 if d.get("ok") is True else 1)' 2>/dev/null
+}
+runsvdir_count() {
+  pgrep -f "$PREFIX/bin/runsvdir $SVDIR" 2>/dev/null | wc -l | tr -d ' '
+}
+
+failed=0
+log "recovery start pid=$$"
+termux-wake-lock >/dev/null 2>&1 || log "wake-lock command failed"
+
+if tmux has-session -t termux-core-keeper 2>/dev/null; then
+  log "termux-core-keeper already running"
+elif [ -x "$HOME/bin/termux-core-keeper" ]; then
+  log "starting termux-core-keeper"
+  tmux new-session -d -s termux-core-keeper "$HOME/bin/termux-core-keeper" || failed=1
+else
+  log "termux-core-keeper missing"
+  failed=1
+fi
+
+count="$(runsvdir_count)"
+if [ "$count" -eq 0 ]; then
+  log "runsvdir absent; waiting for keeper"
+  i=0
+  while [ "$i" -lt 16 ] && [ "$(runsvdir_count)" -eq 0 ]; do
+    sleep 1
+    i=$((i+1))
+  done
+  count="$(runsvdir_count)"
+  if [ "$count" -eq 0 ]; then
+    log "keeper did not restore runsvdir; starting fallback"
+    nohup "$PREFIX/bin/runsvdir" "$SVDIR" >/dev/null 2>&1 &
+    sleep 1
+    count="$(runsvdir_count)"
+  fi
+fi
+if [ "$count" -ne 1 ]; then
+  log "runsvdir count invalid: $count"
+  failed=1
+else
+  log "runsvdir count ok: 1"
+fi
+
+records="$(local_mcp_records)"
+if printf '%s\n' "$records" | grep -q '^__REGISTRY_ERROR__|'; then
+  log "local MCP registry unreadable"
+  failed=1
+  records=""
+fi
+required="drive-worker selfrun-server desktop-commander"
+while IFS='|' read -r svc port; do
+  [ -n "$svc" ] || continue
+  case " $required " in *" $svc "*) ;; *) required="$required $svc" ;; esac
+done <<EOF_RECORDS
+$records
+EOF_RECORDS
+
+for svc in $required; do
+  if ! ensure_service "$svc"; then
+    log "service failed: $svc"
+    failed=1
+  fi
+done
+
+if check_drive_health; then
+  log "drive-worker health ok"
+else
+  log "drive-worker health failed"
+  failed=1
+fi
+
+while IFS='|' read -r svc port; do
+  [ -n "$svc" ] || continue
+  if [ -n "$port" ]; then
+    if check_tcp_port "$port"; then
+      log "local MCP tcp ok: $svc port=$port"
+    else
+      log "local MCP tcp failed: $svc port=$port"
+      failed=1
+    fi
+  fi
+done <<EOF_PORTS
+$records
+EOF_PORTS
+
+for svc in $required; do
+  if service_running "$svc"; then
+    log "final runit ok: $svc"
+  else
+    log "final runit failed: $svc"
+    failed=1
+  fi
+done
+
+count="$(runsvdir_count)"
+if [ "$count" -ne 1 ]; then
+  log "final runsvdir count invalid: $count"
+  failed=1
+fi
+
+if [ "$failed" -eq 0 ]; then
+  log "recovery success"
+  exit 0
+fi
+log "recovery failed"
+exit 1
