@@ -26,6 +26,8 @@ public final class WatchdogService extends Service {
     private static final long HEALTHY_INTERVAL_MS = 60_000L;
     private static final long CONFIRM_INTERVAL_MS = 5_000L;
 
+    private static volatile boolean runningInProcess;
+
     private final Object scheduleLock = new Object();
 
     private ScheduledExecutorService executor;
@@ -39,6 +41,10 @@ public final class WatchdogService extends Service {
     private volatile boolean destroyed;
 
     public static boolean requestStart(Context context) {
+        if (!new WatchdogStateStore(context).monitoringEnabled()) {
+            return false;
+        }
+
         Intent intent = new Intent(context, WatchdogService.class);
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -53,9 +59,14 @@ public final class WatchdogService extends Service {
         }
     }
 
+    public static boolean isRunningInProcess() {
+        return runningInProcess;
+    }
+
     @Override
     public void onCreate() {
         super.onCreate();
+        runningInProcess = true;
         startedElapsedMs = SystemClock.elapsedRealtime();
         stateStore = new WatchdogStateStore(this);
         stateMachine = new HealthStateMachine(
@@ -67,24 +78,34 @@ public final class WatchdogService extends Service {
         executor = Executors.newSingleThreadScheduledExecutor(
                 runnable -> new Thread(runnable, "termux-watchdog-monitor"));
         startForegroundNow();
-        AlarmScheduler.scheduleBackup(this);
+        if (stateStore.monitoringEnabled()) {
+            AlarmScheduler.scheduleBackup(this);
+        }
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (!stateStore.monitoringEnabled()) {
+            AlarmScheduler.cancelBackup(this);
+            stopSelf();
+            return START_NOT_STICKY;
+        }
         scheduleCheck(0L);
         return START_STICKY;
     }
 
     @Override
     public void onTaskRemoved(Intent rootIntent) {
-        AlarmScheduler.scheduleBackup(this);
+        if (stateStore != null && stateStore.monitoringEnabled()) {
+            AlarmScheduler.scheduleBackup(this);
+        }
         super.onTaskRemoved(rootIntent);
     }
 
     @Override
     public void onDestroy() {
         destroyed = true;
+        runningInProcess = false;
         synchronized (scheduleLock) {
             if (scheduledCheck != null) {
                 scheduledCheck.cancel(false);
@@ -94,7 +115,11 @@ public final class WatchdogService extends Service {
         if (executor != null) {
             executor.shutdownNow();
         }
-        AlarmScheduler.scheduleBackup(this);
+        if (stateStore != null && stateStore.monitoringEnabled()) {
+            AlarmScheduler.scheduleBackup(this);
+        } else {
+            AlarmScheduler.cancelBackup(this);
+        }
         super.onDestroy();
     }
 
@@ -158,7 +183,7 @@ public final class WatchdogService extends Service {
     }
 
     private void performCheck() {
-        if (destroyed) {
+        if (destroyed || !stateStore.monitoringEnabled()) {
             return;
         }
 
@@ -194,6 +219,9 @@ public final class WatchdogService extends Service {
                         wallNow,
                         SystemClock.elapsedRealtime() - startedElapsedMs,
                         "");
+                if (attempts > 0) {
+                    stateStore.recordRecoverySuccess(wallNow);
+                }
             }
 
             stateStore.clearIncident();
@@ -229,6 +257,9 @@ public final class WatchdogService extends Service {
 
             long elapsedNow = SystemClock.elapsedRealtime();
             if (recoveryBackoff.shouldAttempt(elapsedNow)) {
+                if (!stateStore.monitoringEnabled()) {
+                    return;
+                }
                 int attempt = recoveryBackoff.nextAttemptNumber();
                 RunCommandBridge.DispatchResult dispatch =
                         RunCommandBridge.dispatch(this);
@@ -248,6 +279,9 @@ public final class WatchdogService extends Service {
                         0L,
                         SystemClock.elapsedRealtime() - startedElapsedMs,
                         result.failureReason());
+                if (!dispatch.wasDispatched()) {
+                    stateStore.recordRecoveryFailure(wallNow, dispatch.detail());
+                }
             }
         }
 

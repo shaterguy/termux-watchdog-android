@@ -58,6 +58,33 @@ public final class StaticSecurityTest {
                         + "                        wallNow,"));
     }
 
+
+    @Test
+    public void monitoringStopIsPersistedAndRespectedAcrossRearmPaths() throws Exception {
+        String store = readUtf8(projectFile(
+                "src/main/java/com/shaterguy/termuxwatchdog/WatchdogStateStore.java"));
+        String alarm = readUtf8(projectFile(
+                "src/main/java/com/shaterguy/termuxwatchdog/AlarmReceiver.java"));
+        String rearm = readUtf8(projectFile(
+                "src/main/java/com/shaterguy/termuxwatchdog/RearmReceiver.java"));
+        String service = readUtf8(projectFile(
+                "src/main/java/com/shaterguy/termuxwatchdog/WatchdogService.java"));
+        String activity = readUtf8(projectFile(
+                "src/main/java/com/shaterguy/termuxwatchdog/MainActivity.java"));
+
+        assertTrue(store.contains("monitoring_enabled"));
+        assertTrue(alarm.contains("if (!stateStore.monitoringEnabled())"));
+        assertTrue(rearm.contains("if (!stateStore.monitoringEnabled())"));
+        assertTrue(service.contains("if (!stateStore.monitoringEnabled())"));
+        assertTrue(activity.contains("Watchdog 중지"));
+        assertTrue(activity.contains("Watchdog 시작"));
+        assertTrue(activity.contains("Termux 실행환경"));
+        assertTrue(activity.contains("Drive Worker"));
+        assertTrue(activity.contains("최근 장애 로그"));
+        assertFalse(activity.contains("SM-S931N"));
+        assertFalse(activity.contains("Galaxy S25"));
+    }
+
     private static String readUtf8(Path path) throws Exception {
         return new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
     }

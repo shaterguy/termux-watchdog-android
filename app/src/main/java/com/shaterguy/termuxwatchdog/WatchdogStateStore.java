@@ -12,6 +12,14 @@ public final class WatchdogStateStore {
         prefs = storage.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
     }
 
+    public boolean monitoringEnabled() {
+        return prefs.getBoolean("monitoring_enabled", true);
+    }
+
+    public void setMonitoringEnabled(boolean enabled) {
+        prefs.edit().putBoolean("monitoring_enabled", enabled).commit();
+    }
+
     public HealthStateMachine.State monitorState() {
         String raw = prefs.getString("monitor_state", HealthStateMachine.State.HEALTHY.name());
         try {
@@ -33,6 +41,10 @@ public final class WatchdogStateStore {
                 .apply();
     }
 
+    public String lastFailureReason() {
+        return prefs.getString("last_failure_reason", "");
+    }
+
     public long lastHealthSuccessAt() {
         return prefs.getLong("last_health_success_at", 0L);
     }
@@ -52,10 +64,15 @@ public final class WatchdogStateStore {
         return prefs.getLong("incident_detected_at", 0L);
     }
 
+    public long lastIncidentAt() {
+        return prefs.getLong("last_incident_at", 0L);
+    }
+
     public void startIncident(String incidentId, long detectedAtMs) {
         prefs.edit()
                 .putString("incident_id", incidentId)
                 .putLong("incident_detected_at", detectedAtMs)
+                .putLong("last_incident_at", detectedAtMs)
                 .apply();
     }
 
@@ -69,5 +86,33 @@ public final class WatchdogStateStore {
 
     public void setRecoveryAttempt(int attempt) {
         prefs.edit().putInt("recovery_attempt", Math.max(0, attempt)).apply();
+    }
+
+    public void recordRecoverySuccess(long atMs) {
+        prefs.edit()
+                .putString("last_recovery_status", "SUCCESS")
+                .putLong("last_recovery_at", atMs)
+                .putString("last_recovery_detail", "post_recovery_health_ok")
+                .apply();
+    }
+
+    public void recordRecoveryFailure(long atMs, String detail) {
+        prefs.edit()
+                .putString("last_recovery_status", "FAILED")
+                .putLong("last_recovery_at", atMs)
+                .putString("last_recovery_detail", detail == null ? "unknown" : detail)
+                .apply();
+    }
+
+    public String lastRecoveryStatus() {
+        return prefs.getString("last_recovery_status", "");
+    }
+
+    public long lastRecoveryAt() {
+        return prefs.getLong("last_recovery_at", 0L);
+    }
+
+    public String lastRecoveryDetail() {
+        return prefs.getString("last_recovery_detail", "");
     }
 }

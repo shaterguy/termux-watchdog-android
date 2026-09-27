@@ -8,11 +8,17 @@ import android.os.PowerManager;
 
 import org.json.JSONObject;
 
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.InputStreamReader;
 import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.List;
 
 public final class IncidentLogger {
     private static final long MAX_BYTES = 256L * 1024L;
@@ -68,6 +74,36 @@ public final class IncidentLogger {
         } catch (Exception ignored) {
             // The watchdog loop must survive diagnostic logging failures.
         }
+    }
+
+    public synchronized List<String> readRecentLines(int limit) {
+        int boundedLimit = Math.max(0, Math.min(limit, 20));
+        ArrayDeque<String> recent = new ArrayDeque<>(Math.max(1, boundedLimit));
+        if (boundedLimit == 0 || !logFile.isFile()) {
+            return new ArrayList<>();
+        }
+
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                new FileInputStream(logFile), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.isEmpty()) {
+                    continue;
+                }
+                if (recent.size() == boundedLimit) {
+                    recent.removeFirst();
+                }
+                recent.addLast(line);
+            }
+        } catch (Exception ignored) {
+            return new ArrayList<>();
+        }
+
+        ArrayList<String> result = new ArrayList<>(recent.size());
+        while (!recent.isEmpty()) {
+            result.add(recent.removeLast());
+        }
+        return result;
     }
 
     private Object instantOrNull(long epochMs) {
