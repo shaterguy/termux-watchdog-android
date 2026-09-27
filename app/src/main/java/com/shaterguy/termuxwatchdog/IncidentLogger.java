@@ -34,6 +34,7 @@ public final class IncidentLogger {
             int consecutiveFailures,
             int recoveryAttempt,
             String runCommandResult,
+            long termuxRecoveryAtMs,
             long healthRecoveryAtMs,
             long watchdogUptimeMs,
             String lastFailureReason) {
@@ -46,7 +47,7 @@ public final class IncidentLogger {
             json.put("consecutive_failures", consecutiveFailures);
             json.put("recovery_attempt", recoveryAttempt);
             json.put("run_command_result", nullable(runCommandResult));
-            json.put("termux_recovery_at", JSONObject.NULL);
+            json.put("termux_recovery_at", instantOrNull(termuxRecoveryAtMs));
             json.put("health_recovery_at", instantOrNull(healthRecoveryAtMs));
             json.put("watchdog_uptime_ms", Math.max(0L, watchdogUptimeMs));
             json.put("screen_state", screenState());

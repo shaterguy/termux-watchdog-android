@@ -191,6 +191,7 @@ public final class WatchdogService extends Service {
                         attempts,
                         "post_recovery_health_ok",
                         wallNow,
+                        wallNow,
                         SystemClock.elapsedRealtime() - startedElapsedMs,
                         "");
             }
@@ -221,6 +222,7 @@ public final class WatchdogService extends Service {
                         0,
                         "",
                         0L,
+                        0L,
                         SystemClock.elapsedRealtime() - startedElapsedMs,
                         result.failureReason());
             }
@@ -242,6 +244,7 @@ public final class WatchdogService extends Service {
                         stateMachine.consecutiveFailures(),
                         attempt,
                         dispatch.detail(),
+                        0L,
                         0L,
                         SystemClock.elapsedRealtime() - startedElapsedMs,
                         result.failureReason());

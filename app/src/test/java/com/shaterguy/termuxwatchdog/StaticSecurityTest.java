@@ -42,6 +42,22 @@ public final class StaticSecurityTest {
         assertFalse(source.contains("PendingIntent"));
     }
 
+    @Test
+    public void incidentLogRecordsObservedTermuxRecoveryTimestamp() throws Exception {
+        String logger = readUtf8(projectFile(
+                "src/main/java/com/shaterguy/termuxwatchdog/IncidentLogger.java"));
+        String service = readUtf8(projectFile(
+                "src/main/java/com/shaterguy/termuxwatchdog/WatchdogService.java"));
+
+        assertTrue(logger.contains("long termuxRecoveryAtMs"));
+        assertTrue(logger.contains(
+                "json.put(\"termux_recovery_at\", instantOrNull(termuxRecoveryAtMs));"));
+        assertTrue(service.contains(
+                "\"post_recovery_health_ok\",\n"
+                        + "                        wallNow,\n"
+                        + "                        wallNow,"));
+    }
+
     private static String readUtf8(Path path) throws Exception {
         return new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
     }
