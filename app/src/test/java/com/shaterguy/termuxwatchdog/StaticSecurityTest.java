@@ -21,11 +21,53 @@ public final class StaticSecurityTest {
         assertTrue(manifest.contains("android.intent.action.BOOT_COMPLETED"));
         assertTrue(manifest.contains("android.intent.action.LOCKED_BOOT_COMPLETED"));
         assertTrue(manifest.contains("android.intent.action.MY_PACKAGE_REPLACED"));
-        assertFalse(manifest.contains("android.permission.SCHEDULE_EXACT_ALARM"));
+        assertTrue(manifest.contains("android.permission.SCHEDULE_EXACT_ALARM"));
 
         int firstInternal = manifest.indexOf("<service");
         assertTrue(firstInternal >= 0);
         assertTrue(manifest.substring(firstInternal).contains("android:exported=\"false\""));
+    }
+
+    @Test
+    public void loopbackCleartextIsNarrowlyScopedAndMatchesFixedHealthEndpoint()
+            throws Exception {
+        String manifest = readUtf8(projectFile("src/main/AndroidManifest.xml"));
+        String network = readUtf8(projectFile("src/main/res/xml/network_security_config.xml"));
+        String contract = readUtf8(projectFile(
+                "src/main/java/com/shaterguy/termuxwatchdog/RecoveryContract.java"));
+
+        assertTrue(manifest.contains(
+                "android:networkSecurityConfig=\"@xml/network_security_config\""));
+        assertFalse(manifest.contains("android:usesCleartextTraffic=\"true\""));
+        assertTrue(network.contains("<base-config cleartextTrafficPermitted=\"false\""));
+        assertTrue(network.contains("<domain-config cleartextTrafficPermitted=\"true\""));
+        assertTrue(network.contains(
+                "<domain includeSubdomains=\"false\">127.0.0.1</domain>"));
+        assertFalse(network.contains("<domain includeSubdomains=\"true\">"));
+        assertTrue(contract.contains(
+                "DRIVE_WORKER_HEALTH = \"http://127.0.0.1:17841/health\""));
+    }
+
+    @Test
+    public void backupRevivalUsesExactAlarmForegroundServiceExemption() throws Exception {
+        String manifest = readUtf8(projectFile("src/main/AndroidManifest.xml"));
+        String scheduler = readUtf8(projectFile(
+                "src/main/java/com/shaterguy/termuxwatchdog/AlarmScheduler.java"));
+        String receiver = readUtf8(projectFile(
+                "src/main/java/com/shaterguy/termuxwatchdog/AlarmReceiver.java"));
+        String activity = readUtf8(projectFile(
+                "src/main/java/com/shaterguy/termuxwatchdog/MainActivity.java"));
+
+        assertTrue(manifest.contains("android:name=\".AlarmReceiver\""));
+        assertFalse(manifest.contains("android:name=\".BackupJobService\""));
+        assertTrue(scheduler.contains("canScheduleExactAlarms()"));
+        assertTrue(scheduler.contains("setExactAndAllowWhileIdle("));
+        assertFalse(scheduler.contains("setAndAllowWhileIdle("));
+        assertTrue(scheduler.contains("PendingIntent.FLAG_IMMUTABLE"));
+        assertTrue(receiver.contains("WatchdogService.requestStart(context)"));
+        assertTrue(activity.contains("Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM"));
+        assertTrue(activity.contains("백업 자동재기동 권한"));
+        assertTrue(activity.contains("장애 시 자동 재기동 보장 안 됨"));
     }
 
     @Test
@@ -57,7 +99,6 @@ public final class StaticSecurityTest {
                         + "                        wallNow,\n"
                         + "                        wallNow,"));
     }
-
 
     @Test
     public void monitoringStopIsPersistedAndRespectedAcrossRearmPaths() throws Exception {

@@ -5,9 +5,12 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.Typeface;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
@@ -46,8 +49,10 @@ public final class MainActivity extends Activity {
     private TextView recentIncidentValue;
     private TextView recoveryValue;
     private TextView failuresValue;
+    private TextView backupAlarmValue;
     private TextView incidentsText;
     private Button toggleButton;
+    private Button backupAlarmButton;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -68,6 +73,9 @@ public final class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        if (stateStore != null && stateStore.monitoringEnabled()) {
+            AlarmScheduler.scheduleBackup(this);
+        }
         handler.removeCallbacks(refreshRunnable);
         handler.post(refreshRunnable);
     }
@@ -141,6 +149,13 @@ public final class MainActivity extends Activity {
         termuxValue = addStatus(left, "Termux 실행환경");
         driveWorkerValue = addStatus(left, "Drive Worker");
         failuresValue = addStatus(left, "연속 실패");
+        backupAlarmValue = addStatus(left, "백업 자동재기동 권한");
+
+        backupAlarmButton = new Button(this);
+        backupAlarmButton.setAllCaps(false);
+        backupAlarmButton.setText("알람 및 리마인더 권한 열기");
+        backupAlarmButton.setOnClickListener(view -> openExactAlarmSettingsIfNeeded());
+        left.addView(backupAlarmButton, matchWrap());
 
         lastHealthyValue = addStatus(right, "마지막 정상 확인");
         recentIncidentValue = addStatus(right, "최근 장애 발생");
@@ -198,6 +213,7 @@ public final class MainActivity extends Activity {
             requestRunCommandPermissionIfNeeded();
             AlarmScheduler.scheduleBackup(this);
             WatchdogService.requestStart(this);
+            openExactAlarmSettingsIfNeeded();
         }
         refreshStatus();
     }
@@ -208,6 +224,20 @@ public final class MainActivity extends Activity {
             requestPermissions(
                     new String[]{RecoveryContract.RUN_COMMAND_PERMISSION},
                     REQUEST_RUN_COMMAND);
+        }
+    }
+
+    private void openExactAlarmSettingsIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S
+                || AlarmScheduler.canScheduleExactAlarms(this)) {
+            return;
+        }
+
+        Intent request = new Intent(
+                Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
+                Uri.parse("package:" + getPackageName()));
+        if (request.resolveActivity(getPackageManager()) != null) {
+            startActivity(request);
         }
     }
 
@@ -228,6 +258,14 @@ public final class MainActivity extends Activity {
                 ? driveWorkerText(state)
                 : "감시 중지 · 마지막 " + driveWorkerText(state));
         failuresValue.setText(String.valueOf(stateStore.consecutiveFailures()));
+        boolean exactAlarmReady = AlarmScheduler.canScheduleExactAlarms(this);
+        backupAlarmValue.setText(exactAlarmReady
+                ? "사용 가능"
+                : "권한 필요 · 장애 시 자동 재기동 보장 안 됨");
+        backupAlarmButton.setVisibility(
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !exactAlarmReady
+                        ? View.VISIBLE
+                        : View.GONE);
         lastHealthyValue.setText(formatTime(stateStore.lastHealthSuccessAt()));
         recentIncidentValue.setText(formatTime(stateStore.lastIncidentAt()));
         recoveryValue.setText(formatRecovery());

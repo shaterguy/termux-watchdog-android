@@ -4,6 +4,7 @@ import android.app.AlarmManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
+import android.os.Build;
 import android.os.SystemClock;
 
 public final class AlarmScheduler {
@@ -12,23 +13,36 @@ public final class AlarmScheduler {
 
     private AlarmScheduler() {}
 
-    public static void scheduleBackup(Context context) {
+    public static boolean canScheduleExactAlarms(Context context) {
+        AlarmManager alarms = context.getSystemService(AlarmManager.class);
+        if (alarms == null) {
+            return false;
+        }
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.S
+                || alarms.canScheduleExactAlarms();
+    }
+
+    public static boolean scheduleBackup(Context context) {
         if (!new WatchdogStateStore(context).monitoringEnabled()) {
             cancelBackup(context);
-            return;
+            return false;
         }
 
         AlarmManager alarms = context.getSystemService(AlarmManager.class);
-        if (alarms == null) {
-            return;
+        if (alarms == null || !canScheduleExactAlarms(context)) {
+            return false;
         }
 
-        PendingIntent pending = backupPendingIntent(context);
         long triggerAt = SystemClock.elapsedRealtime() + BACKUP_INTERVAL_MS;
-        alarms.setAndAllowWhileIdle(
-                AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                triggerAt,
-                pending);
+        try {
+            alarms.setExactAndAllowWhileIdle(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    triggerAt,
+                    backupPendingIntent(context));
+            return true;
+        } catch (SecurityException e) {
+            return false;
+        }
     }
 
     public static void cancelBackup(Context context) {
