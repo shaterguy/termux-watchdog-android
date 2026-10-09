@@ -151,7 +151,7 @@ public final class WatchdogService extends Service {
                 : new Notification.Builder(this);
         Notification notification = builder
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
-                .setContentTitle("Termux Watchdog")
+                .setContentTitle(getString(R.string.app_name))
                 .setContentText("Monitoring local Termux services")
                 .setContentIntent(content)
                 .setOngoing(true)
@@ -227,6 +227,13 @@ public final class WatchdogService extends Service {
             stateStore.clearIncident();
             recoveryBackoff.reset();
             scheduleCheck(HEALTHY_INTERVAL_MS);
+            return;
+        }
+
+        if (result.isUnknown()) {
+            stateMachine.onUnknownResult();
+            stateStore.saveMonitorState(stateMachine.state(), 0, result.failureReason());
+            scheduleCheck(CONFIRM_INTERVAL_MS);
             return;
         }
 

@@ -101,7 +101,7 @@ public final class MainActivity extends Activity {
                 ScrollView.LayoutParams.WRAP_CONTENT));
 
         TextView title = new TextView(this);
-        title.setText("Termux Watchdog");
+        title.setText(getString(R.string.app_name));
         title.setTextSize(28f);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         root.addView(title);
@@ -275,6 +275,8 @@ public final class MainActivity extends Activity {
 
     private String termuxText(HealthStateMachine.State state) {
         switch (state) {
+            case UNKNOWN:
+                return "확인 불가 · " + healthFailureText();
             case HEALTHY:
                 return "응답 정상";
             case SUSPECT:
@@ -288,6 +290,8 @@ public final class MainActivity extends Activity {
 
     private String driveWorkerText(HealthStateMachine.State state) {
         switch (state) {
+            case UNKNOWN:
+                return "상태 확인 실패";
             case HEALTHY:
                 return "정상";
             case SUSPECT:
@@ -297,6 +301,17 @@ public final class MainActivity extends Activity {
             default:
                 return "확인 불가";
         }
+    }
+
+    private String healthFailureText() {
+        String reason = stateStore.lastFailureReason();
+        if ("health_timeout".equals(reason)) return "응답 시간 초과";
+        if ("permission_denied".equals(reason)) return "접속 권한 오류";
+        if ("health_invalid_json".equals(reason)) return "응답 형식 오류";
+        if ("health_json_nesting_limit".equals(reason)) return "응답 구조가 너무 복잡함";
+        if ("json_ok_not_true".equals(reason)) return "서버가 정상 응답을 보내지 않음";
+        if (reason != null && reason.startsWith("http_")) return "HTTP " + reason.substring(5);
+        return "응답을 읽지 못함";
     }
 
     private String formatRecovery() {

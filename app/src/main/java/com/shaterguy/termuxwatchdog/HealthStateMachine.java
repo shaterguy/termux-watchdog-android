@@ -2,6 +2,7 @@ package com.shaterguy.termuxwatchdog;
 
 public final class HealthStateMachine {
     public enum State {
+        UNKNOWN,
         HEALTHY,
         SUSPECT,
         DOWN
@@ -21,7 +22,7 @@ public final class HealthStateMachine {
         } else if (consecutiveFailures > 0) {
             state = State.SUSPECT;
         } else {
-            state = initialState == State.HEALTHY ? State.HEALTHY : State.HEALTHY;
+            state = initialState == State.UNKNOWN ? State.UNKNOWN : State.HEALTHY;
         }
     }
 
@@ -34,6 +35,12 @@ public final class HealthStateMachine {
 
         consecutiveFailures++;
         state = consecutiveFailures >= 3 ? State.DOWN : State.SUSPECT;
+        return state;
+    }
+
+    public State onUnknownResult() {
+        consecutiveFailures = 0;
+        state = State.UNKNOWN;
         return state;
     }
 

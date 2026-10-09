@@ -10,12 +10,18 @@ android {
         applicationId 'com.shaterguy.termuxwatchdog'
         minSdk 26
         targetSdk 36
-        versionCode 100001
-        versionName '0.1.0-dev1'
+        versionCode 100002
+        versionName '0.1.0-dev2'
     }
 
     buildTypes {
+        debug {
+            applicationIdSuffix '.test'
+            debuggable false
+            resValue 'string', 'app_name', 'Termux Watchdog TEST'
+        }
         release {
+            resValue 'string', 'app_name', 'Termux Watchdog'
             minifyEnabled false
         }
     }
