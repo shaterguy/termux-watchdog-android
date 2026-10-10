@@ -126,6 +126,19 @@ public final class StaticSecurityTest {
         assertFalse(activity.contains("Galaxy S25"));
     }
 
+    @Test
+    public void binderAdmissionChecksDirectionBitAndRetainsPeerChecks() throws Exception {
+        String cli = readUtf8(projectFile("src/main/java/com/shaterguy/termuxwatchdog/BridgeCli.java"));
+        String receiver = readUtf8(projectFile("src/main/java/com/shaterguy/termuxwatchdog/NativeAuthReceiver.java"));
+        assertTrue(cli.contains("(flags & IBinder.FLAG_ONEWAY)==0"));
+        assertTrue(receiver.contains("(flags & IBinder.FLAG_ONEWAY)!=0"));
+        assertFalse(cli.contains("flags!=IBinder.FLAG_ONEWAY"));
+        assertFalse(receiver.contains("flags!=0"));
+        assertTrue(cli.contains("data.dataSize()>BridgeHandshake.MAX_PARCEL_BYTES || !peers.verifyWatchdog(peerUid)"));
+        assertTrue(receiver.contains("reply==null || finished.get() || data.dataSize()>max || !peers.verify(peerUid)"));
+        assertTrue(receiver.contains("sentFromUid>=0 && peerUid!=sentFromUid"));
+    }
+
     private static String readUtf8(Path path) throws Exception {
         return new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
     }

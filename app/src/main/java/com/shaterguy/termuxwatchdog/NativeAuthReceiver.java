@@ -66,7 +66,7 @@ public final class NativeAuthReceiver extends BroadcastReceiver {
             @Override protected boolean onTransact(int code,Parcel data,Parcel reply,int flags) throws RemoteException {
                 int peerUid=Binder.getCallingUid();
                 int max=code==BridgeHandshake.TX_REQUEST ? BridgeHandshake.MAX_REQUEST_PARCEL_BYTES : BridgeHandshake.MAX_PARCEL_BYTES;
-                if((sentFromUid>=0 && peerUid!=sentFromUid) || flags!=0 || reply==null || finished.get() || data.dataSize()>max || !peers.verify(peerUid)) return false;
+                if((sentFromUid>=0 && peerUid!=sentFromUid) || (flags & IBinder.FLAG_ONEWAY)!=0 || reply==null || finished.get() || data.dataSize()>max || !peers.verify(peerUid)) return false;
                 boolean keep=false;
                 try {
                     data.enforceInterface(BridgeHandshake.ENDPOINT);

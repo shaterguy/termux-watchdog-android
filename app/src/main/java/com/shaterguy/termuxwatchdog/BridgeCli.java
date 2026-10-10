@@ -47,7 +47,7 @@ public final class BridgeCli {
         Binder callback=new Binder() {
             @Override protected boolean onTransact(int code,Parcel data,Parcel reply,int flags) throws RemoteException {
                 int peerUid=Binder.getCallingUid();
-                if(flags!=IBinder.FLAG_ONEWAY || data.dataSize()>BridgeHandshake.MAX_PARCEL_BYTES || !peers.verifyWatchdog(peerUid)) return false;
+                if((flags & IBinder.FLAG_ONEWAY)==0 || data.dataSize()>BridgeHandshake.MAX_PARCEL_BYTES || !peers.verifyWatchdog(peerUid)) return false;
                 try {
                     data.enforceInterface(BridgeHandshake.CALLBACK);
                     int version=data.readInt(); String returned=data.readString();
