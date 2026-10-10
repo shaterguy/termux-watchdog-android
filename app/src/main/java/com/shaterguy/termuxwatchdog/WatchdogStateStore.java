@@ -13,8 +13,10 @@ public final class WatchdogStateStore {
     }
 
     public boolean monitoringEnabled() {
-        return prefs.getBoolean("monitoring_enabled", true);
+        return monitoringRequested() && !prefs.getBoolean("power_mode_blocked", false);
     }
+
+    public boolean monitoringRequested() { return prefs.getBoolean("monitoring_enabled", true); }
 
     public void setMonitoringEnabled(boolean enabled) {
         prefs.edit().putBoolean("monitoring_enabled", enabled).commit();

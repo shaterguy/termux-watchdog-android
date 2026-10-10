@@ -93,6 +93,10 @@ runsvdir_count() {
 }
 
 failed=0
+if ! "$HOME/bin/termux-watchdog-recovery-allowed"; then
+  log "recovery suppressed by power-save mode or unverified mode state"
+  exit 0
+fi
 log "recovery start pid=$$"
 termux-wake-lock >/dev/null 2>&1 || log "wake-lock command failed"
 

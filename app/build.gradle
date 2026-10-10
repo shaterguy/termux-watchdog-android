@@ -2,7 +2,19 @@ plugins {
     id 'com.android.application'
 }
 
+// Reviewed public observations; an explicit empty override remains fail closed.
+def publicTrust = new Properties()
+rootProject.file('auth-trust.properties').withInputStream { publicTrust.load(it) }
+def termuxSignerPin = providers.gradleProperty('termuxSignerSha256').getOrElse(publicTrust.getProperty('termuxSignerSha256', ''))
+def termuxPins = termuxSignerPin.split(',', -1)
+if (termuxSignerPin != '' && (termuxPins.length > 2 || new java.util.HashSet<String>(java.util.Arrays.asList(termuxPins)).size() != termuxPins.length
+        || !termuxPins.every { it ==~ /[0-9a-f]{64}/ })) throw new GradleException('Invalid Termux signer pins')
+
+def nativeTokenTransportEnabled = providers.gradleProperty('nativeTokenTransportEnabled').getOrElse('true')
+if (!(nativeTokenTransportEnabled in ['true', 'false'])) throw new GradleException('Invalid native token activation flag')
+
 android {
+    buildFeatures { buildConfig true }
     namespace 'com.shaterguy.termuxwatchdog'
     compileSdk 36
 
@@ -10,8 +22,10 @@ android {
         applicationId 'com.shaterguy.termuxwatchdog'
         minSdk 26
         targetSdk 36
-        versionCode 100003
-        versionName '0.1.0-dev3'
+        versionCode 100008
+        versionName '0.1.0-dev8'
+        buildConfigField 'boolean', 'NATIVE_TOKEN_TRANSPORT_ENABLED', nativeTokenTransportEnabled
+        buildConfigField 'String', 'TERMUX_SIGNER_SHA256', '"' + termuxSignerPin + '"'
     }
 
     buildTypes {
@@ -28,5 +42,6 @@ android {
 }
 
 dependencies {
+    implementation 'com.google.android.gms:play-services-auth:21.5.0'
     testImplementation 'junit:junit:4.13.2'
 }
