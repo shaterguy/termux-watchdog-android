@@ -1,0 +1,14 @@
+{
+  "component": "termux-google-auth",
+  "version": "1.0.6-dev1",
+  "apk_version_unchanged": "0.1.0-dev9",
+  "files": {
+    "broker.mjs": "7431e3bf7f54d51afea1a381397369c97c539b2734ccc9c03ffd0f1b24c30d85",
+    "main.mjs": "eb55c23b6c7f9e4b7ce3fa5201f7c4d64d9394e2bcdd9ec7a94df3f990c31ea4",
+    "persistent-bridge.mjs": "2ab045f998373c373432b090048d430fab1b3ea7855a2f0e025815374412d2a6",
+    "bridge-config.json": "0c51aa152751ff82afb9f24e1aff2a54ffbfc25c002b0f603173399b6cd743f7",
+    "bridge.dex": "9f3007571343e5be09c530a5503a9e7fc9692877c130285928bcb50edf245079",
+    "deploy.py": "90249fb3f480a40b902e96f14b2780dd18a54a969c6bca0c8968060ae6122b4e",
+    "build-manifest.json": "d59a09af59b0137b635640afacd6d2253d802bab989a01c41663a301adc6d8a4"
+  }
+}

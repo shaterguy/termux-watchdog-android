@@ -1,0 +1,29 @@
+✖ sequential native requests reuse one Android runtime process (442.354692ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 0
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 724.684308
+
+✖ failing tests:
+
+test at runtime/google-auth/tests/native-reuse.test.mjs:7:1
+✖ sequential native requests reuse one Android runtime process (442.354692ms)
+  AssertionError [ERR_ASSERTION]: two requests must not start two Android runtimes
+  
+  2 !== 1
+  
+      at TestContext.<anonymous> (file:///data/data/com.termux/files/home/work/watchdog-auth-power-20261011/runtime/google-auth/tests/native-reuse.test.mjs:21:12)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1332:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 2,
+    expected: 1,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
