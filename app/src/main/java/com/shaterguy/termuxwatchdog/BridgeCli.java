@@ -9,6 +9,9 @@ import android.os.Parcel;
 import android.os.Process;
 import android.os.RemoteException;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.concurrent.CompletableFuture;
@@ -19,19 +22,50 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /** Execute only a reviewed hash-pinned standalone DEX. Credentials use stdin/stdout pipes only. */
 public final class BridgeCli {
     private static final AtomicBoolean completed=new AtomicBoolean();
+    private static boolean persistent;
     private static void finish(String frame,int exit) {
         if(completed.compareAndSet(false,true)) {
-            System.out.print(frame); System.out.flush(); Runtime.getRuntime().halt(exit);
+            System.out.print(frame); System.out.flush();
+            // Early failures may leave unread request bytes. Never reuse that stream.
+            if(!persistent || exit!=0) Runtime.getRuntime().halt(exit);
         }
     }
     private static void fail(String code) { finish(AuthProtocol.error(code),2); }
     public static void main(String[] args) {
+        persistent=args.length==1 && "--persistent".equals(args[0]);
+        if(!persistent) { runExchange(args); return; }
+        while(true) {
+            final String marker;
+            try { marker=readLine(System.in,3,true); }
+            catch(IOException ignored) { Runtime.getRuntime().halt(2); return; }
+            if(marker==null) { Runtime.getRuntime().halt(0); return; }
+            if(!"B1".equals(marker)) { Runtime.getRuntime().halt(2); return; }
+            completed.set(false);
+            runExchange(new String[0]);
+        }
+    }
+    private static void runExchange(String[] args) {
         Thread deadline=new Thread(()->{
             try { Thread.sleep(8000); } catch(InterruptedException ignored) { return; }
             // No pipe write here: a blocked stdout cannot defeat the hard deadline.
             Runtime.getRuntime().halt(124);
         },"watchdog-bridge-deadline");
         deadline.setDaemon(true); deadline.start();
+        try { exchange(args); } finally { deadline.interrupt(); }
+    }
+    /** Bounded stream framing; the payload reader is called only after mutual hello. */
+    private static String readLine(InputStream input,int limit,boolean allowCleanEof) throws IOException {
+        ByteArrayOutputStream bytes=new ByteArrayOutputStream();
+        for(int count=0;count<limit;count++) {
+            int next=input.read();
+            if(next<0 && count==0 && allowCleanEof) return null;
+            if(next=='\n') return bytes.toString(StandardCharsets.US_ASCII.name());
+            if(next<0 || next>127 || next=='\r' || (next<32 && next!='\t')) throw new IOException("BAD_REQUEST");
+            bytes.write(next);
+        }
+        throw new IOException("BAD_REQUEST");
+    }
+    private static void exchange(String[] args) {
         if(args.length!=0) { fail("BAD_REQUEST"); return; }
         final AuthPeerVerifier peers;
         try { peers=new AuthPeerVerifier(new StandalonePackages()); }
@@ -72,7 +106,12 @@ public final class BridgeCli {
             boolean activated=hello(offer,peers,challenge);
             // Identity is established before request bytes, including a rejection, are consumed.
             final String input;
-            try { input=AuthProtocol.read(System.in); }
+            try {
+                if(persistent) {
+                    String line=readLine(System.in,AuthProtocol.MAX_FRAME_BYTES,false);
+                    input=AuthProtocol.read(new ByteArrayInputStream((line+"\n").getBytes(StandardCharsets.US_ASCII)));
+                } else input=AuthProtocol.read(System.in);
+            }
             catch(Exception ignored) { close(offer,peers,challenge); fail("BAD_REQUEST"); return; }
             if(AuthProtocol.isProbe(input)) {
                 close(offer,peers,challenge);

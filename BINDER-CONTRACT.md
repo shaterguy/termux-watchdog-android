@@ -134,3 +134,7 @@ Sender identity sources (API34+; no added permission):
 The standalone manifest marks token_transport_enabled:true / token_adapter_implemented:true
 for helper capability, google_sdk_included:false, and supported_operations. Those
 capability fields do not assert current server opt-in, account grant or runtime health.
+
+## Persistent standalone runtime extension (Termux runtime 1.0.6-dev1)
+
+The no-argument CLI retains its legacy LF-plus-EOF contract. With exactly `--persistent`, a non-secret `B1` line wakes the process for one exchange. A fresh mutual HELLO completes before the bounded credential frame is consumed. The per-frame LF reader is revalidated through the existing strict parser using an isolated byte stream. Errors terminate the process, so unread bytes are never reused. Each response still consumes its one-shot Binder session; no Binder session or nonce is reused. The hard deadline is per exchange and there is no idle heartbeat.

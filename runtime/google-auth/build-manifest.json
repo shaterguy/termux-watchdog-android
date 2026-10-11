@@ -1,0 +1,30 @@
+{
+  "binder_session_reused": false,
+  "dex_sha256": "9f3007571343e5be09c530a5503a9e7fc9692877c130285928bcb50edf245079",
+  "entrypoint": "com.shaterguy.termuxwatchdog.BridgeCli",
+  "google_sdk_included": false,
+  "mutual_hello_required": true,
+  "persistent_process_supported": true,
+  "schema": "watchdog-bridge-build-v2",
+  "sources": {
+    "app/src/main/java/com/shaterguy/termuxwatchdog/AuthPeerPolicy.java": "54c28934edf36c305fb25f3125aa71aba362c8e58f73b9934db45e6cccde6526",
+    "app/src/main/java/com/shaterguy/termuxwatchdog/AuthPeerVerifier.java": "44bcff6c5b3b31444d26e6b62cb6788d731a8b65bebb5124f85dadc81f80b9c2",
+    "app/src/main/java/com/shaterguy/termuxwatchdog/AuthProtocol.java": "e5524c91de5ff2eadbd9829057cc838aef38693185d32766c082b5ee57db4ac4",
+    "app/src/main/java/com/shaterguy/termuxwatchdog/BinderBootstrap.java": "002c67029c4dd3338dd5f036393ad0f0818957b76373864d55cdbf7356577d71",
+    "app/src/main/java/com/shaterguy/termuxwatchdog/BridgeCli.java": "67a3fcaa611eead471beff4026e1a156db2c3a88cb59d3226872bb4c6d706f1a",
+    "app/src/main/java/com/shaterguy/termuxwatchdog/BridgeHandshake.java": "384e971ee060934e4cda04ebfddaa18c8032dcc5ac329a8bc55658aeb430a374",
+    "app/src/main/java/com/shaterguy/termuxwatchdog/PackageIdentityReader.java": "61bcf9c106a0d36b77a6e081107aa14cddcfa926744532421e485285704eb6cf",
+    "app/src/main/java/com/shaterguy/termuxwatchdog/StandalonePackages.java": "b6397ed2d8470727b4e2156d7820784cd2ab5fa00379cc3c044bc0a64a876479",
+    "auth-trust.properties": "75f7230b6765aefa002acdfc0e97400796c28e4aaa201f8bc53f59b0246d332e"
+  },
+  "supported_operations": [
+    "probe",
+    "status",
+    "access",
+    "refresh"
+  ],
+  "termux_signer_sha256": "228fb2cfe90831c1499ec3ccaf61e96e8e1ce70766b9474672ce427334d41c42,b6da01480eefd5fbf2cd3771b8d1021ec791304bdd6c4bf41d3faabad48ee5e1",
+  "token_adapter_implemented": true,
+  "token_transport_enabled": true,
+  "runtime_version": "1.0.6-dev1"
+}

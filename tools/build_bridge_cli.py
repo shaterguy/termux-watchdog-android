@@ -42,7 +42,7 @@ def main():
     dex=out/'dex'; dex.mkdir(exist_ok=True)
     subprocess.run([str(a.d8),'--release','--min-api','26','--lib',str(a.android_jar),'--output',str(dex),str(jar)],check=True)
     output=dex/'classes.dex'
-    manifest={'schema':'watchdog-bridge-build-v2','entrypoint':'com.shaterguy.termuxwatchdog.BridgeCli','token_adapter_implemented':True,'token_transport_enabled':True,'google_sdk_included':False,'supported_operations':['probe','status','access','refresh'],'mutual_hello_required':True,
+    manifest={'schema':'watchdog-bridge-build-v2','entrypoint':'com.shaterguy.termuxwatchdog.BridgeCli','token_adapter_implemented':True,'token_transport_enabled':True,'google_sdk_included':False,'supported_operations':['probe','status','access','refresh'],'mutual_hello_required':True,'persistent_process_supported':True,'binder_session_reused':False,
               'termux_signer_sha256':a.termux_signer_sha256,'dex_sha256':hashlib.sha256(output.read_bytes()).hexdigest(),
               'sources':{str(f.relative_to(root)):hashlib.sha256(f.read_bytes()).hexdigest() for f in sources+[trust]}}
     (out/'build-manifest.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')

@@ -1,0 +1,28 @@
+✔ access is reused for sixty seconds, then rechecks native state (7.936923ms)
+✔ status retains its separate two-second cache (0.758769ms)
+✔ health is diagnostic-only and never starts Android authentication (0.812923ms)
+✔ concurrent access is single-flight (3.940538ms)
+✔ explicitly rejected token can never be reused (2.03623ms)
+✔ refresh takes precedence over access and replaces the cache (1.493769ms)
+✔ late old access cannot overwrite a newly refreshed token (0.87377ms)
+✔ not-ready status invalidates cached access (1.556308ms)
+✔ temporary failures retain exponential backoff rather than spawning repeatedly (1.625461ms)
+✔ malformed fields and credential-bearing health requests fail closed (1.276846ms)
+✔ sequential native requests reuse one Android runtime process (241.736923ms)
+✔ one process handles sequential status and access frames (14.728539ms)
+✔ maximum four native processes; fifth request is rejected without replay (3.616308ms)
+✔ extra response retires only the bad child (2.197923ms)
+✔ bad response retires only the bad child (1.320308ms)
+✔ oversized response retires only the bad child (3.203ms)
+✔ exit response retires only the bad child (0.916077ms)
+✔ timeout is bounded and a refresh is never replayed (22.139769ms)
+✔ idle timer removes children without starting a heartbeat (61.253462ms)
+✔ close rejects outstanding work once and never allows new work (1.429231ms)
+ℹ tests 20
+ℹ suites 0
+ℹ pass 20
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 540.663077

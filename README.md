@@ -97,3 +97,7 @@ use an Android Debug key, or transfer private signing material.
 Binder callbacks check the ONEWAY bit, while request endpoints require that bit to be clear. Additional platform transport flags no longer reject otherwise verified calls. UID/current-signer, parcel bounds, nonce, schema and session deadlines are unchanged. Both the APK and standalone DEX must be updated.
 
 Host regression: `python3 tools/test_binder_flags.py` compiles the exact admission expressions and checks transport flags, wrong-direction calls, unverified peers and existing guard bounds.
+
+## Termux-only runtime 1.0.6-dev1
+
+The runtime in `runtime/google-auth/` reuses the hash-pinned standalone Android process while retaining fresh Binder sessions. This branch does not change the APK version or grant. See the component README for persistent framing, read-only DEX installation, rolling deployment and verification.

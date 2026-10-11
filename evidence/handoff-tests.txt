@@ -1,0 +1,10 @@
+test_bad_candidate_never_replaces_old_route (__main__.HandoffTests.test_bad_candidate_never_replaces_old_route) ... ok
+test_concurrent_route_change_is_rejected (__main__.HandoffTests.test_concurrent_route_change_is_rejected) ... ok
+test_continuous_calls_across_repeated_switches_have_no_missing_route (__main__.HandoffTests.test_continuous_calls_across_repeated_switches_have_no_missing_route) ... ok
+test_inflight_old_request_completes_after_atomic_switch (__main__.HandoffTests.test_inflight_old_request_completes_after_atomic_switch) ... ok
+test_route_follows_new_socket_inode_after_restart (__main__.HandoffTests.test_route_follows_new_socket_inode_after_restart) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 1.389s
+
+OK
