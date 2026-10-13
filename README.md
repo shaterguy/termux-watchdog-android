@@ -101,3 +101,7 @@ Host regression: `python3 tools/test_binder_flags.py` compiles the exact admissi
 ## Termux-only runtime 1.0.6-dev1
 
 The runtime in `runtime/google-auth/` reuses the hash-pinned standalone Android process while retaining fresh Binder sessions. This branch does not change the APK version or grant. See the component README for persistent framing, read-only DEX installation, rolling deployment and verification.
+
+## Per-device Drive Worker resume fencing
+
+The Watchdog app already calls `~/bin/termux-watchdog-mode`. Its live Termux implementation must be sourced from `termux/mode_controller.py`, installed at `~/.local/lib/termux-watchdog/mode-controller-v1.1/mode_controller.py` without changing the Java app, auth broker, or existing power-mode state. On every verified exit from power saving, the controller atomically writes `~/.termux-watchdog/command-resume-fence-v1.json` (server identity, precise UTC timestamp, command generation, operation ID) and reads it back BEFORE any service resumes. An ordinary worker restart does not update the fence. The matching Drive Worker must be available first.
