@@ -14,6 +14,11 @@ final class PowerModeBridge {
     private PowerModeBridge() {}
 
     static void send(Context context, String command) {
+        synchronized (LifecycleStore.LOCK) { sendLocked(context, command); }
+    }
+
+    private static void sendLocked(Context context, String command) {
+        if (new LifecycleStore(context).blocksRecovery()) return;
         if (!command.equals("status") && !command.equals("enable") && !command.equals("disable")) {
             throw new IllegalArgumentException("MODE_COMMAND_INVALID");
         }

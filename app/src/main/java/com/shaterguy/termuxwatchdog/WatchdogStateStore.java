@@ -6,14 +6,17 @@ import android.content.SharedPreferences;
 public final class WatchdogStateStore {
     private static final String PREFS = "watchdog_state";
     private final SharedPreferences prefs;
+    private final LifecycleStore lifecycle;
 
     public WatchdogStateStore(Context context) {
         Context storage = context.createDeviceProtectedStorageContext();
         prefs = storage.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        lifecycle = new LifecycleStore(context);
     }
 
     public boolean monitoringEnabled() {
-        return monitoringRequested() && !prefs.getBoolean("power_mode_blocked", false);
+        return monitoringRequested() && !prefs.getBoolean("power_mode_blocked", false)
+                && !lifecycle.blocksRecovery();
     }
 
     public boolean monitoringRequested() { return prefs.getBoolean("monitoring_enabled", true); }

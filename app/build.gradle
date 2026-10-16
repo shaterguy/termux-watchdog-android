@@ -22,8 +22,8 @@ android {
         applicationId 'com.shaterguy.termuxwatchdog'
         minSdk 26
         targetSdk 36
-        versionCode 100009
-        versionName '0.1.0-dev9'
+        versionCode 100010
+        versionName '0.1.0-dev10'
         buildConfigField 'boolean', 'NATIVE_TOKEN_TRANSPORT_ENABLED', nativeTokenTransportEnabled
         buildConfigField 'String', 'TERMUX_SIGNER_SHA256', '"' + termuxSignerPin + '"'
     }

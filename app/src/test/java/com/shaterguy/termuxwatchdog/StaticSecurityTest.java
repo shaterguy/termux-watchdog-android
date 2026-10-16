@@ -139,6 +139,35 @@ public final class StaticSecurityTest {
         assertTrue(receiver.contains("sentFromUid>=0 && peerUid!=sentFromUid"));
     }
 
+    @Test
+    public void lifecycleCommandsAreFixedAndAllRecoveryPathsUseDurableGate() throws Exception {
+        String bridge = readUtf8(projectFile("src/main/java/com/shaterguy/termuxwatchdog/LifecycleBridge.java"));
+        String store = readUtf8(projectFile("src/main/java/com/shaterguy/termuxwatchdog/LifecycleStore.java"));
+        String state = readUtf8(projectFile("src/main/java/com/shaterguy/termuxwatchdog/WatchdogStateStore.java"));
+        String mode = readUtf8(projectFile("src/main/java/com/shaterguy/termuxwatchdog/PowerModeBridge.java"));
+        String recovery = readUtf8(projectFile("src/main/java/com/shaterguy/termuxwatchdog/RunCommandBridge.java"));
+        String activity = readUtf8(projectFile("src/main/java/com/shaterguy/termuxwatchdog/MainActivity.java"));
+        String manifest = readUtf8(projectFile("src/main/AndroidManifest.xml"));
+        assertTrue(bridge.contains("/bin/termux-watchdog-lifecycle"));
+        assertTrue(bridge.contains("new String[]{\"v1\", request.action, request.nonce"));
+        assertTrue(bridge.contains("new AuthPeerVerifier(context).verify(uid)"));
+        assertTrue(bridge.contains("PendingIntent.FLAG_ONE_SHOT"));
+        assertTrue(bridge.contains("Intent.ACTION_RUN"));
+        assertFalse(bridge.contains("RecoveryCommandSpec"));
+        assertFalse(bridge.contains("Runtime.getRuntime"));
+        assertTrue(store.contains("LifecycleRules.verifiedBootChanged"));
+        assertTrue(store.contains("lifecycle_blocked"));
+        assertTrue(state.contains("!lifecycle.blocksRecovery()"));
+        assertTrue(mode.contains("synchronized (LifecycleStore.LOCK)"));
+        assertTrue(recovery.contains("synchronized (LifecycleStore.LOCK)"));
+        assertTrue(activity.contains("!lifecycleStore.blocksRecovery() && SystemClock.elapsedRealtime()"));
+        assertTrue(activity.contains("작업을 마쳤음 · 종료"));
+        assertTrue(activity.contains("모든 프로세스 종료 여부는 확인할 수 없음"));
+        assertTrue(manifest.contains("android:name=\".LifecycleResultReceiver\"\n            android:exported=\"false\""));
+        assertFalse(manifest.contains("FORCE_STOP_PACKAGES"));
+        assertFalse(manifest.contains("KILL_BACKGROUND_PROCESSES"));
+    }
+
     private static String readUtf8(Path path) throws Exception {
         return new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
     }

@@ -9,6 +9,13 @@ public final class RunCommandBridge {
     private RunCommandBridge() {}
 
     public static DispatchResult dispatch(Context context) {
+        synchronized (LifecycleStore.LOCK) { return dispatchLocked(context); }
+    }
+
+    private static DispatchResult dispatchLocked(Context context) {
+        if (!new WatchdogStateStore(context).monitoringEnabled()) {
+            return DispatchResult.failed("recovery_suppressed");
+        }
         if (context.checkSelfPermission(RecoveryContract.RUN_COMMAND_PERMISSION)
                 != PackageManager.PERMISSION_GRANTED) {
             return DispatchResult.failed("permission_not_granted");

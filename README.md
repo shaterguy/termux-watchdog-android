@@ -2,7 +2,7 @@
 
 Android watchdog app that monitors the local Termux service environment and invokes one fixed recovery entry point when repeated health failures indicate that recovery is required.
 
-Current development version: `0.1.0-dev9`.
+Current development version: `0.1.0-dev10`.
 
 This development APK updates the existing `com.shaterguy.termuxwatchdog` app.
 Successive development versions retain the original package and dedicated signing
@@ -15,6 +15,48 @@ requests access on demand; it does not save refresh tokens, access-token files, 
 credential logs. Reauthorization only opens after an explicit foreground button tap.
 The exact Google Cloud Android package and signing-certificate registration must
 exist; this source change does not create that configuration or grant access.
+
+## Separate Termux runtime exit/start (dev10)
+
+The existing saver remains independent. **Termux 종료** warns that unsaved work,
+terminal sessions and shared-UID Termux extensions can be affected. It uses a fixed
+Termux-owned helper, fresh package/UID checks, dynamic process identities and public
+Bionic pidfds. No PID/name/service allowlist or process-group-wide kill is accepted.
+PID reuse, unreadable process metadata and unsupported pidfds fail conservatively.
+This is not Android force-stop: Android or other authorized apps may start Termux again.
+
+**Termux 켜기 · 전체 자동 시작** admits a new generation and opens Termux's official
+New session action. That normal login follows the user's current profile/startup
+configuration and the platform's current enabled runit registrations. Registration
+names are not copied into Watchdog or restored from an exit-time snapshot. Disabled
+registrations are preserved. Boot-only scripts and former arbitrary command memory
+are not replayed. A new shell's first prompt and live supervisor/registration
+observations, rather than Activity launch success, determine the reported result.
+Malformed registrations are reported separately and never silently removed.
+
+A durable lifecycle gate prevents Watchdog alarms, health recovery and ten-second
+power status polling from waking an intentionally stopped runtime. It persists across
+app recreation and expires only on positively verified physical boot identity change.
+Both new actions are refused while saver is active; turn saver off through its existing
+button first. Late callbacks and operation generations cannot release a newer gate.
+A definite pre-admission refusal restores the previous gate; uncertain writes or
+transport failures remain blocked until explicit start succeeds or verified reboot.
+
+The final stop receipt only acknowledges admission. The detached Termux helper may
+terminate its own result transport; the app never claims that every UID process is
+gone. It displays an unconfirmed exit request and allows a later explicit start after
+the bounded stop window. Partial startup remains distinct from fully observed startup.
+
+The matching lifecycle helper must be installed before the APK's new buttons can work.
+Installation is source/hash-bound, preserves startup files and records reversible
+backups; it does not run stop/start, consent, credential commands or boot scripts.
+The lifecycle result protocol has 16 exact ASCII fields (<=4,096 bytes), nonce,
+sequence, action, boot ID and fresh UID correlation. It never includes tokens,
+environment values, command lines or restoration lists.
+
+Real shutdown/start acceptance is separate from unit tests, lint and APK build.
+Never run a shutdown test while another job is active or before an independent
+recovery path and result-observation plan have been checked.
 
 ## Native authorization transport
 

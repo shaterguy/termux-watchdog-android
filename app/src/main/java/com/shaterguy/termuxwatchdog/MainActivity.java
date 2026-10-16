@@ -41,10 +41,11 @@ public final class MainActivity extends Activity {
     private final Runnable refreshRunnable = new Runnable() {
         @Override
         public void run() {
-            if (SystemClock.elapsedRealtime() >= nextModeRefresh) {
+            if (!lifecycleStore.blocksRecovery() && SystemClock.elapsedRealtime() >= nextModeRefresh) {
                 nextModeRefresh = SystemClock.elapsedRealtime() + MODE_REFRESH_MS;
                 PowerModeBridge.send(MainActivity.this, "status");
             }
+            if (foreground) LifecycleBridge.launchReady(MainActivity.this);
             refreshStatus();
             handler.postDelayed(this, UI_REFRESH_MS);
         }
@@ -53,6 +54,10 @@ public final class MainActivity extends Activity {
     private WatchdogStateStore stateStore;
     private IncidentLogger incidentLogger;
     private PowerModeStore powerModeStore;
+    private LifecycleStore lifecycleStore;
+    private Button termuxStopButton;
+    private Button termuxStartButton;
+    private TextView lifecycleValue;
 
     private TextView watchdogValue;
     private TextView termuxValue;
@@ -82,6 +87,7 @@ public final class MainActivity extends Activity {
         stateStore = new WatchdogStateStore(this);
         incidentLogger = new IncidentLogger(this);
         powerModeStore = new PowerModeStore(this);
+        lifecycleStore = new LifecycleStore(this);
         nativeAuth = NativeAuthRuntime.get(this);
         consentPending = savedInstanceState != null && savedInstanceState.getBoolean("google_consent_pending", false);
 
@@ -178,6 +184,32 @@ public final class MainActivity extends Activity {
         modeHelp.setTextSize(14f);
         root.addView(modeHelp, matchWrap());
 
+        termuxStopButton = new Button(this);
+        termuxStopButton.setAllCaps(false);
+        termuxStopButton.setText("Termux 종료");
+        termuxStopButton.setOnClickListener(view -> new AlertDialog.Builder(this)
+                .setTitle("Termux 실행환경 종료")
+                .setMessage("Termux와 같은 UID를 사용하는 확장 앱의 실행 중인 작업, 터미널과 서비스도 종료 대상에 포함될 수 있습니다. 작업 완료 여부를 모두 자동 판정할 수 없습니다. 저장과 진행 중인 작업을 먼저 마쳐 주세요.\n\n종료 후에는 이 앱의 ‘Termux 켜기’로 현재 활성화된 자동 시작 등록과 일반 로그인을 시작합니다. 실행 중이던 임시 명령이나 메모리는 복원되지 않습니다.")
+                .setNegativeButton("취소", null)
+                .setPositiveButton("작업을 마쳤음 · 종료", (dialog, which) -> {
+                    LifecycleBridge.begin(this, "prepare-stop");
+                    refreshStatus();
+                }).show());
+        root.addView(termuxStopButton, matchWrap());
+        termuxStartButton = new Button(this);
+        termuxStartButton.setAllCaps(false);
+        termuxStartButton.setText("Termux 켜기 · 전체 자동 시작");
+        termuxStartButton.setOnClickListener(view -> {
+            LifecycleBridge.begin(this, "prepare-start");
+            refreshStatus();
+        });
+        root.addView(termuxStartButton, matchWrap());
+        lifecycleValue = addStatus(root, "Termux 종료 · 다시 켜기");
+        TextView lifecycleHelp = new TextView(this);
+        lifecycleHelp.setText("개별 서비스 목록 대신 현재 활성화된 runit 등록과 일반 로그인 시작 경로를 사용합니다. 기기 부팅 전용 스크립트는 다시 실행하지 않습니다. 절전모드를 먼저 해제해야 종료와 켜기를 사용할 수 있습니다.\n종료 중 자동복구는 멈추며, 물리 재부팅 후에는 기존 자동 시작 설정을 따릅니다. Android 강제 중지 상태를 만드는 기능은 아닙니다.");
+        lifecycleHelp.setTextSize(14f);
+        root.addView(lifecycleHelp, matchWrap());
+
         toggleButton = new Button(this);
         toggleButton.setAllCaps(false);
         toggleButton.setOnClickListener(view -> toggleMonitoring());
@@ -268,7 +300,7 @@ public final class MainActivity extends Activity {
     }
 
     private void toggleMonitoring() {
-        if (powerModeStore.policy().blocksRecovery()) return;
+        if (powerModeStore.policy().blocksRecovery() || lifecycleStore.blocksRecovery()) return;
         if (stateStore.monitoringEnabled()) {
             stateStore.setMonitoringEnabled(false);
             AlarmScheduler.cancelBackup(this);
@@ -316,7 +348,8 @@ public final class MainActivity extends Activity {
         boolean running = WatchdogService.isRunningInProcess();
         HealthStateMachine.State state = stateStore.monitorState();
 
-        watchdogValue.setText(powerBlocked ? "절전모드 · 자동복구 일시정지"
+        watchdogValue.setText(lifecycleStore.blocksRecovery() ? "Termux 종료·시작 제어 · 자동복구 일시정지"
+                : powerBlocked ? "절전모드 · 자동복구 일시정지"
                 : !enabled ? "중지됨" : running ? "실행 중" : "시작 대기");
         termuxValue.setText(enabled
                 ? termuxText(state)
@@ -336,16 +369,61 @@ public final class MainActivity extends Activity {
         lastHealthyValue.setText(formatTime(stateStore.lastHealthSuccessAt()));
         recentIncidentValue.setText(formatTime(stateStore.lastIncidentAt()));
         recoveryValue.setText(formatRecovery());
-        toggleButton.setEnabled(!powerBlocked);
+        toggleButton.setEnabled(!powerBlocked && !lifecycleStore.blocksRecovery());
         toggleButton.setText(stateStore.monitoringRequested() ? "Watchdog 중지" : "Watchdog 시작");
         refreshPowerMode();
+        refreshLifecycle();
         incidentsText.setText(formatRecentIncidents(incidentLogger.readRecentLines(8)));
+    }
+
+    private void refreshLifecycle() {
+        boolean saver = powerModeStore.policy().blocksRecovery()
+                || powerModeStore.policy().awaitingAcknowledgement();
+        boolean busy = lifecycleStore.busy();
+        termuxStopButton.setEnabled(!saver && !busy);
+        termuxStartButton.setEnabled(!saver && !busy);
+        String label;
+        switch (lifecycleStore.state()) {
+            case "STOPPING": label = "종료 준비·요청 중 · 자동복구 일시정지"; break;
+            case "OFF_REQUESTED": label = "종료 요청 전달됨 · 모든 프로세스 종료 여부는 확인할 수 없음"; break;
+            case "READY_TO_LAUNCH": label = "시작 준비 완료 · Termux 창 열기 대기"; break;
+            case "STARTING": label = "새 로그인과 현재 자동 시작 등록 확인 중"; break;
+            case "START_PARTIAL": label = "시작 확인 미완료 · 자동복구 일시정지"; break;
+            case "UNKNOWN": label = "결과 확인 불가 · 자동복구 일시정지\n‘Termux 켜기’로 다시 시작을 요청할 수 있습니다."; break;
+            default:
+                boolean observedStart = false;
+                try { observedStart = LifecycleSnapshot.parse(lifecycleStore.snapshot()).state.equals("START_OBSERVED"); }
+                catch (IllegalArgumentException ignored) { }
+                label = observedStart ? "새 로그인과 현재 활성 자동 시작 등록 확인됨"
+                        : "종료 요청 없음 · 현재 실행 여부를 뜻하지 않음";
+        }
+        if (saver) label += "\n절전모드를 먼저 꺼 주세요.";
+        String error = lifecycleStore.error();
+        if (!error.isEmpty()) label += "\n" + lifecycleError(error);
+        lifecycleValue.setText(label);
+    }
+
+    private String lifecycleError(String code) {
+        switch (code) {
+            case "SAVER_ACTIVE": return "절전모드를 먼저 꺼 주세요.";
+            case "BUSY": return "이전 요청 처리가 끝난 뒤 다시 시도해 주세요.";
+            case "TERMUX_PERMISSION_REQUIRED": return "기존 Termux 명령 실행 권한을 확인해 주세요.";
+            case "PACKAGE_UID_UNAVAILABLE": case "UID_MISMATCH":
+                return "설치된 Termux의 UID·서명 확인에 실패했습니다.";
+            case "PIDFD_UNAVAILABLE": return "안전한 프로세스 제어 기능을 사용할 수 없어 종료하지 않습니다.";
+            case "LIFECYCLE_COMMAND_FAILED": case "TERMUX_COMMAND_UNAVAILABLE":
+                return "Termux 제어 도우미의 설치와 기존 실행 권한을 확인해 주세요.";
+            case "BOOT_ID_UNAVAILABLE": return "현재 부팅 식별자를 확인하지 못했습니다.";
+            case "REGISTRATION_ERRORS": return "자동 시작 등록 중 확인이 필요한 항목이 있습니다.";
+            case "LOGIN_NOT_OBSERVED": return "새 일반 로그인 완료를 확인하지 못했습니다.";
+            default: return "확인 필요: " + code;
+        }
     }
 
     private void refreshPowerMode() {
         PowerModePolicy policy = powerModeStore.policy();
         PowerModeSnapshot observed = powerModeStore.snapshot();
-        powerModeButton.setEnabled(!policy.awaitingAcknowledgement()
+        powerModeButton.setEnabled(!lifecycleStore.blocksRecovery() && !policy.awaitingAcknowledgement()
                 && (policy.blocksRecovery() || powerModeStore.canEnable()));
         powerModeButton.setText(policy.blocksRecovery()
                 ? "절전모드 끄기 · 기존 서비스 복원" : "절전모드 켜기");

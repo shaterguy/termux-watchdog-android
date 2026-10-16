@@ -61,6 +61,10 @@
         </receiver>
 
         <receiver
+            android:name=".LifecycleResultReceiver"
+            android:exported="false" />
+
+        <receiver
             android:name=".PowerModeResultReceiver"
             android:exported="false" />
 

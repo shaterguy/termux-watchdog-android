@@ -8,12 +8,14 @@ import java.util.UUID;
 
 /** Intent, callback identities and the conservative recovery gate survive process death. */
 final class PowerModeStore {
-    private static final Object LOCK = new Object();
+    private static final Object LOCK = LifecycleStore.LOCK;
+    private final LifecycleStore lifecycle;
     private static final PowerModeReadiness READINESS = new PowerModeReadiness();
     private static final long CALLBACK_TIMEOUT_MS = 20_000L;
     private final SharedPreferences prefs;
 
     PowerModeStore(Context context) {
+        lifecycle = new LifecycleStore(context);
         prefs = context.createDeviceProtectedStorageContext()
                 .getSharedPreferences("watchdog_state", Context.MODE_PRIVATE);
     }
@@ -32,6 +34,7 @@ final class PowerModeStore {
     Request register(String command) {
         synchronized (LOCK) {
             // Recheck inside the registration lock: UI/bridge checks may already be stale.
+            if (lifecycle.blocksRecovery()) return null;
             if (command.equals("enable") && !canEnable()) return null;
             long now = SystemClock.elapsedRealtime();
             long age = now - prefs.getLong("power_request_time_status", -CALLBACK_TIMEOUT_MS);

@@ -1,0 +1,66 @@
+{
+  "PHONE": [
+    {
+      "target": "/data/data/com.termux/files/home/.bashrc",
+      "before": "af67dee30954ab3524a69d09f58fece1a582a3bf914637f95de40822aec44604",
+      "source": "termux/startup/PHONE/bashrc",
+      "after": "0d1dcb489fc9772934bcfffac6dfd9316c46fce08a01a41dd08ce87865cfa114"
+    },
+    {
+      "target": "/data/data/com.termux/files/usr/bin/service-daemon",
+      "before": "7c4608dc5fdb5d433006242cc8bb3b3293db68cf3e172ce4b68062d0370ff2d4",
+      "source": "termux/startup/PHONE/service-daemon",
+      "after": "9607dcd3a5606e8e6010356d99ddc2ac9f82b1f253bbfc8ba56d82ce66708aa4"
+    },
+    {
+      "target": "/data/data/com.termux/files/home/bin/termux-core-keeper",
+      "before": "cb6f954b18f02ee3a681dd662b4ff2937bad1890f4c24dfc855d4792528b63f6",
+      "source": "termux/startup/PHONE/termux-core-keeper",
+      "after": "ad85e1fa3437f57b3cacc912e7fc073cca9fb47fca6bd2fe9bf7c06704145c28"
+    },
+    {
+      "target": "/data/data/com.termux/files/home/bin/termux-watchdog-recovery-allowed",
+      "before": "40bec65af2a0381ea9151ef19d290ae2a9a9511d1a8642678b1d4d5595418a27",
+      "source": "termux/startup/PHONE/termux-watchdog-recovery-allowed",
+      "after": "51f6d0fc69f6042a18b9e19a23970ed5beccf8578136263a60c95f3185579005"
+    },
+    {
+      "target": "/data/data/com.termux/files/home/.local/lib/termux-watchdog/mode-controller-v1.1/mode_controller.py",
+      "before": "d18b1f3f7eb03b6fe8ed9e3df414139b3201920ab0bd230b648a9a27e6ace882",
+      "source": "termux/mode_controller.py",
+      "after": "fe4d259921c669adeb6f1db524a11f1d0c95f1062d8fc45ba3885a51596eee53"
+    }
+  ],
+  "TABLET": [
+    {
+      "target": "/data/data/com.termux/files/home/.bashrc",
+      "before": "af67dee30954ab3524a69d09f58fece1a582a3bf914637f95de40822aec44604",
+      "source": "termux/startup/TABLET/bashrc",
+      "after": "0d1dcb489fc9772934bcfffac6dfd9316c46fce08a01a41dd08ce87865cfa114"
+    },
+    {
+      "target": "/data/data/com.termux/files/usr/bin/service-daemon",
+      "before": "7c4608dc5fdb5d433006242cc8bb3b3293db68cf3e172ce4b68062d0370ff2d4",
+      "source": "termux/startup/TABLET/service-daemon",
+      "after": "9607dcd3a5606e8e6010356d99ddc2ac9f82b1f253bbfc8ba56d82ce66708aa4"
+    },
+    {
+      "target": "/data/data/com.termux/files/home/bin/termux-core-keeper",
+      "before": "bf764f9ccd29e93a3716f73180b73eabfde9adbba834f8a077e7b5fedde65ea5",
+      "source": "termux/startup/TABLET/termux-core-keeper",
+      "after": "0a9639b9439b0983a92e4f6ecab42c4cae61e657efd5a4049fe931bec9b3e058"
+    },
+    {
+      "target": "/data/data/com.termux/files/home/bin/termux-watchdog-recovery-allowed",
+      "before": "40bec65af2a0381ea9151ef19d290ae2a9a9511d1a8642678b1d4d5595418a27",
+      "source": "termux/startup/TABLET/termux-watchdog-recovery-allowed",
+      "after": "51f6d0fc69f6042a18b9e19a23970ed5beccf8578136263a60c95f3185579005"
+    },
+    {
+      "target": "/data/data/com.termux/files/home/.local/lib/termux-watchdog/mode-controller-v1.1/mode_controller.py",
+      "before": "d18b1f3f7eb03b6fe8ed9e3df414139b3201920ab0bd230b648a9a27e6ace882",
+      "source": "termux/mode_controller.py",
+      "after": "fe4d259921c669adeb6f1db524a11f1d0c95f1062d8fc45ba3885a51596eee53"
+    }
+  ]
+}

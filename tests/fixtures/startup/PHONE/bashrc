@@ -1,0 +1,13 @@
+export HOME=/data/data/com.termux/files/home
+export PREFIX=/data/data/com.termux/files/usr
+export PATH=$PREFIX/bin:$HOME/bin:$PATH
+export SVDIR=$PREFIX/var/service
+if ! tmux has-session -t termux-core-keeper 2>/dev/null; then
+  tmux new-session -d -s termux-core-keeper "$HOME/bin/termux-core-keeper"
+fi
+# SIG9_HARDEN_WAKELOCK
+if command -v termux-wake-lock >/dev/null 2>&1; then
+  termux-wake-lock >/dev/null 2>&1 || true
+fi
+
+. "$HOME/.android-sdk-env.sh"

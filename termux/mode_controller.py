@@ -243,6 +243,15 @@ class Controller:
         if verb not in ('enable','disable') or not UUID_RE.fullmatch(nonce) or not (0 < seq <= 9007199254740991):
             raise ValueError('BAD_COMMAND')
         with self.lock():
+            # Atomic admission with the separate whole-Termux lifecycle gate.
+            # This does not change saver selection, journals, or restore behavior.
+            lifecycle = self.root / 'lifecycle-v1.json'
+            if lifecycle.exists() or lifecycle.is_symlink():
+                result = self.execute([str(self.prefix / 'bin/python3'),
+                    str(self.home / '.local/lib/termux-watchdog/lifecycle-v1/lifecycle_controller.py'),
+                    'mode-gate'])
+                if result.returncode != 0:
+                    raise ValueError('MODE_ALREADY_TRANSITIONING')
             row = self.load()
             if seq <= row['command_sequence']:
                 raise ValueError('STALE_COMMAND')

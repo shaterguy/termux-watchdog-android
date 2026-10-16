@@ -1,0 +1,3 @@
+#!/data/data/com.termux/files/usr/bin/sh
+"$HOME/bin/termux-watchdog-lifecycle-internal" recovery-gate || exit 1
+exec /data/data/com.termux/files/usr/bin/python3 /data/data/com.termux/files/home/.local/lib/termux-watchdog/mode-controller-v1.1/mode_controller.py gate

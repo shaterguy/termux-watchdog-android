@@ -1,0 +1,2 @@
+#!/data/data/com.termux/files/usr/bin/sh
+exec /data/data/com.termux/files/usr/bin/python3 /data/data/com.termux/files/home/.local/lib/termux-watchdog/lifecycle-v1/lifecycle_controller.py "$@"

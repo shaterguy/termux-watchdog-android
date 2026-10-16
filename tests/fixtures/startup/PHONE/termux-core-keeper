@@ -1,0 +1,24 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -u
+export HOME=/data/data/com.termux/files/home
+export PREFIX=/data/data/com.termux/files/usr
+export PATH=$PREFIX/bin:$HOME/bin:$PATH
+SERVICE_DIR=$PREFIX/var/service
+LOG=$HOME/.selfrun-server/core-keeper.log
+GATE="$HOME/bin/termux-watchdog-recovery-allowed"
+gate_open() { [ -x "$GATE" ] && "$GATE" >/dev/null 2>&1; }
+mkdir -p "$(dirname "$LOG")"
+if gate_open; then termux-wake-lock >/dev/null 2>&1 || true; fi
+while true; do
+  if ! gate_open; then
+    sleep 15
+    continue
+  fi
+  if ! pgrep -f "^$PREFIX/bin/runsvdir $SERVICE_DIR$" >/dev/null 2>&1; then
+    if ! gate_open; then sleep 15; continue; fi
+    printf '%s restart_runsvdir\n' "$(date -Iseconds)" >>"$LOG"
+    nohup "$PREFIX/bin/runsvdir" "$SERVICE_DIR" >>"$LOG" 2>&1 &
+    sleep 2
+  fi
+  sleep 15
+done
