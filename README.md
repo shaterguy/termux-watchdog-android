@@ -2,7 +2,7 @@
 
 Android watchdog app that monitors the local Termux service environment and invokes one fixed recovery entry point when repeated health failures indicate that recovery is required.
 
-Current development version: `0.1.0-dev10`.
+Current development version: `0.1.0-dev11`.
 
 This development APK updates the existing `com.shaterguy.termuxwatchdog` app.
 Successive development versions retain the original package and dedicated signing
@@ -147,3 +147,11 @@ The runtime in `runtime/google-auth/` reuses the hash-pinned standalone Android 
 ## Per-device Drive Worker resume fencing
 
 The Watchdog app already calls `~/bin/termux-watchdog-mode`. Its live Termux implementation must be sourced from `termux/mode_controller.py`, installed at `~/.local/lib/termux-watchdog/mode-controller-v1.1/mode_controller.py` without changing the Java app, auth broker, or existing power-mode state. On every verified exit from power saving, the controller atomically writes `~/.termux-watchdog/command-resume-fence-v1.json` (server identity, precise UTC timestamp, command generation, operation ID) and reads it back BEFORE any service resumes. An ordinary worker restart does not update the fence. The matching Drive Worker must be available first.
+
+## dev11 clock compatibility fix
+
+The lifecycle helper now reads suspend-aware `CLOCK_BOOTTIME` instead of
+`/proc/uptime`, which Android denies on the tested devices. Boot identity,
+pidfd-only signaling, saver admission and protocol v1 remain unchanged. A clock
+failure still rejects the request before writing a fence or latch. The installed
+helper is updated separately; the APK version identifies the matching delivery.

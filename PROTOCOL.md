@@ -1,6 +1,6 @@
 # Lifecycle v1 protocol
 
-Protocol for the dev10 APK and matching lifecycle-v1 Termux helper. Isolated
+Protocol for the dev10/dev11 APK and matching lifecycle-v1 Termux helper. Isolated
 fixtures and release compilation are separate from live shutdown/start acceptance.
 
 External fixed entry: /data/data/com.termux/files/home/bin/termux-watchdog-lifecycle
@@ -61,3 +61,25 @@ that no process remains; reading it is allowed only during explicit start.
 External apps or user-direct launches are not OS-blocked. A shell reaching its
 first prompt does not prove every arbitrary user startup command succeeded.
 Registration runtime counts and first-prompt evidence remain separate.
+
+## dev11 compatible clock correction
+
+dev11 changes only the boot-elapsed time supplier from a /proc/uptime read to
+time.clock_gettime(time.CLOCK_BOOTTIME). The proc argument is retained for caller
+compatibility but is not read or dereferenced by boot_time. Missing function or
+constant, OSError, ValueError, nonfinite values and negative values remain closed
+with BOOT_ID_UNAVAILABLE. No CLOCK_MONOTONIC or wall-clock fallback is allowed.
+
+CLOCK_BOOTTIME includes suspended time. Existing started_monotonic values already
+represent boot-elapsed seconds, despite the historical field name, so no timestamp
+conversion or state migration is introduced. The existing 20-second boundaries
+and shell start_ticks/SC_CLK_TCK comparison remain unchanged. The finer clock
+precision does not relax the rule that a new shell must be later than the stored
+preparation tick. The independently read kernel boot_id still governs physical
+reboot expiration; a clock reset or failure cannot clear the intentional-stop gate.
+
+The sixteen-key schema, action/state/error enums, pidfd rules and startup/saver
+behavior are unchanged. Isolated clock fixtures model suspend and timestamp/tick
+boundaries; they do not substitute for physical device suspend or live lifecycle
+acceptance tests. Python's clock semantics are documented at
+https://docs.python.org/3/library/time.html#time.CLOCK_BOOTTIME .

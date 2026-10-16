@@ -42,14 +42,14 @@ def boot_identity(proc=Path('/proc')):
 
 
 def boot_time(proc=Path('/proc')):
-    # /proc stat start_ticks and uptime both include time spent suspended. Python
-    # time.monotonic() need not include suspend, so it is not a matching clock.
+    # Keep the proc argument for callers; the suspend-inclusive clock does not
+    # read procfs. CLOCK_MONOTONIC or wall-clock fallback would change its domain.
     try:
-        value = float((proc / 'uptime').read_text().split()[0])
+        value = time.clock_gettime(time.CLOCK_BOOTTIME)
         if not math.isfinite(value) or value < 0:
             raise ValueError()
         return value
-    except (OSError, ValueError, IndexError):
+    except (AttributeError, OSError, ValueError):
         raise Failure('BOOT_ID_UNAVAILABLE') from None
 
 
