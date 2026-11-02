@@ -84,6 +84,7 @@ public final class MainActivity extends Activity {
         powerModeStore = new PowerModeStore(this);
         nativeAuth = NativeAuthRuntime.get(this);
         consentPending = savedInstanceState != null && savedInstanceState.getBoolean("google_consent_pending", false);
+        selectedPage = savedInstanceState == null ? 0 : savedInstanceState.getInt("selected_page", 0);
 
         if (stateStore.monitoringEnabled()) {
             AlarmScheduler.scheduleBackup(this);
@@ -115,156 +116,83 @@ public final class MainActivity extends Activity {
         super.onPause();
     }
 
+    private WatchdogUi ui;
+    private int selectedPage;
+
     private View buildContent() {
-        int pad = dp(20);
-        int gap = dp(12);
+        ui = new WatchdogUi(this, selectedPage);
+        LinearLayout overview = ui.pages[0];
+        LinearLayout connection = ui.pages[1];
+        LinearLayout history = ui.pages[2];
 
-        ScrollView scroll = new ScrollView(this);
-        scroll.setFillViewport(true);
+        LinearLayout monitor = ui.card(overview, "자동복구 감시", "Termux와 핵심 서버의 상태를 확인합니다");
+        watchdogValue = ui.value(monitor, "Watchdog");
+        watchdogValue.setTextSize(26);
+        toggleButton = ui.button(monitor, "", true, this::toggleMonitoring);
 
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(pad, pad, pad, pad);
-        scroll.addView(root, new ScrollView.LayoutParams(
-                ScrollView.LayoutParams.MATCH_PARENT,
-                ScrollView.LayoutParams.WRAP_CONTENT));
+        LinearLayout columns = new LinearLayout(this);
+        columns.setOrientation(ui.wideContent ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
+        overview.addView(columns, matchWrap());
+        LinearLayout left = ui.column();
+        LinearLayout right = ui.column();
+        LinearLayout.LayoutParams lp = ui.wideContent
+                ? new LinearLayout.LayoutParams(0, -2, 1f) : matchWrap();
+        LinearLayout.LayoutParams rp = ui.wideContent
+                ? new LinearLayout.LayoutParams(0, -2, 1f) : matchWrap();
+        if (ui.wideContent) rp.leftMargin = dp(16);
+        columns.addView(left, lp);
+        columns.addView(right, rp);
 
-        TextView title = new TextView(this);
-        title.setText(getString(R.string.app_name));
-        title.setTextSize(28f);
-        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        root.addView(title);
+        LinearLayout services = ui.card(left, "서버 상태", "");
+        termuxValue = ui.value(services, "Termux 실행환경");
+        driveWorkerValue = ui.value(services, "Drive Worker");
+        failuresValue = ui.value(services, "연속 실패 횟수");
+        lastHealthyValue = ui.value(services, "마지막 정상 확인");
 
-        TextView subtitle = new TextView(this);
-        subtitle.setText("Termux 실행환경과 핵심 서버의 상태를 확인하고 자동 복구를 관리합니다.");
-        subtitle.setTextSize(15f);
-        LinearLayout.LayoutParams subtitleParams = matchWrap();
-        subtitleParams.topMargin = dp(6);
-        subtitleParams.bottomMargin = gap;
-        root.addView(subtitle, subtitleParams);
-
-        powerModeButton = new Button(this);
-        powerModeButton.setAllCaps(false);
-        powerModeButton.setOnClickListener(view -> {
+        LinearLayout power = ui.card(right, "절전모드", "진행 중인 작업을 마친 뒤 서비스를 쉬게 합니다");
+        powerModeValue = ui.value(power, "전환 상태");
+        powerModeButton = ui.button(power, "", false, () -> {
             if (powerModeStore.policy().blocksRecovery()) prepareRestore();
             else PowerModeBridge.send(this, "enable");
             nextModeRefresh = 0;
             refreshStatus();
         });
-        root.addView(powerModeButton, matchWrap());
-        powerModeValue = addStatus(root, "절전모드");
-        authModeValue = addStatus(root, "Watchdog Google 인증 · Termux 전달");
-        googleAuthButton = new Button(this);
-        googleAuthButton.setAllCaps(false);
-        googleAuthButton.setText("Google 인증 · 다시 확인");
-        googleAuthButton.setOnClickListener(view -> new AlertDialog.Builder(this)
+        ui.note(power, "절전을 끄면 이전에 켜져 있던 서비스만 복원합니다.");
+        Button details = ui.button(power, "절전 동작 안내", false, () ->
+                new AlertDialog.Builder(this).setTitle("절전모드 동작")
+                .setMessage("절전모드를 켜면 진행 중인 작업을 마친 뒤 Termux 인증 전달 서비스까지 중지합니다. 끄면 인증 전달을 먼저 준비하고 이전에 켜져 있던 서비스만 복원합니다. Google 재인증이 필요하면 연결 화면에서 확인합니다.\n\n공용 Termux 잠금의 소유 상태는 확인할 수 없어 절전 중 임의 해제하지 않습니다.")
+                .setPositiveButton("확인", null).show());
+
+        LinearLayout auth = ui.card(connection, "Google 인증과 Termux 연결", "기존 Google Drive 권한과 인증 전달을 관리합니다");
+        authModeValue = ui.value(auth, "연결 상태");
+        googleAuthButton = ui.button(auth, "Google 인증 확인", true, () ->
+                new AlertDialog.Builder(this)
                 .setTitle("Google Drive 권한")
                 .setMessage("기존 Termux 서비스가 사용하는 Drive 파일을 읽고 수정하기 위해 전체 Drive 범위를 요청합니다. 승인하고 연결 검증이 완료되면 이 기기의 UID와 서명이 확인된 Termux 실행환경에 요청 시 access token을 전달합니다. Google 승인 화면에서 계정과 권한을 확인하세요.")
                 .setNegativeButton("취소", null)
                 .setPositiveButton("Google에서 확인", (dialog, which) -> authorizeFromUi()).show());
-        root.addView(googleAuthButton, matchWrap());
-        stopAuthBridgeButton = new Button(this);
-        stopAuthBridgeButton.setAllCaps(false);
-        stopAuthBridgeButton.setText("Termux 인증 전달 중지");
-        stopAuthBridgeButton.setOnClickListener(view -> {
+        stopAuthBridgeButton = ui.button(auth, "Termux 인증 전달 중지", false, () -> {
             if (!nativeAuth.setEnabled(false)) authUiMessage = "인증 전달 설정을 저장하지 못했습니다.";
             else authUiMessage = "이 기기의 인증 전달을 중지했습니다. Google 권한은 계정 설정에서 관리할 수 있습니다.";
             NativeAuthBridge.stopLocal(this);
             refreshStatus();
         });
-        root.addView(stopAuthBridgeButton, matchWrap());
-        TextView modeHelp = new TextView(this);
-        modeHelp.setText("공용 Termux 잠금의 소유 상태는 확인할 수 없어 절전 중 임의 해제하지 않습니다.\n절전모드를 켜면 진행 중인 작업을 마친 뒤 Termux 인증 전달 서비스까지 중지합니다. 끄면 인증 전달을 먼저 준비하고 이전에 켜져 있던 서비스만 복원합니다. Google 재인증이 필요하면 이 앱에서 확인합니다.");
-        modeHelp.setTextSize(14f);
-        root.addView(modeHelp, matchWrap());
 
-        toggleButton = new Button(this);
-        toggleButton.setAllCaps(false);
-        toggleButton.setOnClickListener(view -> toggleMonitoring());
-        root.addView(toggleButton, matchWrap());
+        LinearLayout alarm = ui.card(connection, "자동 재기동 권한", "장애가 발생했을 때 감시를 다시 시작하는 데 사용합니다");
+        backupAlarmValue = ui.value(alarm, "알람 및 리마인더");
+        backupAlarmButton = ui.button(alarm, "알람 및 리마인더 설정", false, this::openExactAlarmSettingsIfNeeded);
 
-        LinearLayout statusArea = new LinearLayout(this);
-        boolean wide = getResources().getConfiguration().screenWidthDp >= 600;
-        statusArea.setOrientation(wide ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
-        LinearLayout.LayoutParams statusAreaParams = matchWrap();
-        statusAreaParams.topMargin = gap;
-        root.addView(statusArea, statusAreaParams);
-
-        LinearLayout left = new LinearLayout(this);
-        left.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout.LayoutParams leftParams = wide
-                ? new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                : matchWrap();
-        statusArea.addView(left, leftParams);
-
-        LinearLayout right = new LinearLayout(this);
-        right.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout.LayoutParams rightParams = wide
-                ? new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                : matchWrap();
-        if (wide) {
-            rightParams.leftMargin = gap;
-        } else {
-            rightParams.topMargin = gap;
-        }
-        statusArea.addView(right, rightParams);
-
-        watchdogValue = addStatus(left, "Watchdog");
-        termuxValue = addStatus(left, "Termux 실행환경");
-        driveWorkerValue = addStatus(left, "Drive Worker");
-        failuresValue = addStatus(left, "연속 실패");
-        backupAlarmValue = addStatus(left, "백업 자동재기동 권한");
-
-        backupAlarmButton = new Button(this);
-        backupAlarmButton.setAllCaps(false);
-        backupAlarmButton.setText("알람 및 리마인더 권한 열기");
-        backupAlarmButton.setOnClickListener(view -> openExactAlarmSettingsIfNeeded());
-        left.addView(backupAlarmButton, matchWrap());
-
-        lastHealthyValue = addStatus(right, "마지막 정상 확인");
-        recentIncidentValue = addStatus(right, "최근 장애 발생");
-        recoveryValue = addStatus(right, "최근 자동복구");
-
-        TextView incidentsTitle = new TextView(this);
-        incidentsTitle.setText("최근 장애 로그");
-        incidentsTitle.setTextSize(20f);
-        incidentsTitle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        LinearLayout.LayoutParams incidentTitleParams = matchWrap();
-        incidentTitleParams.topMargin = dp(22);
-        root.addView(incidentsTitle, incidentTitleParams);
-
-        incidentsText = new TextView(this);
-        incidentsText.setTextSize(14f);
+        LinearLayout recent = ui.card(history, "최근 동작", "");
+        recentIncidentValue = ui.value(recent, "최근 장애 발생");
+        recoveryValue = ui.value(recent, "최근 자동복구");
+        LinearLayout log = ui.card(history, "장애 기록", "최근 8개 기록 · 길게 눌러 복사");
+        incidentsText = ui.text("", 14, ui.secondary, false);
         incidentsText.setTextIsSelectable(true);
         incidentsText.setTypeface(Typeface.MONOSPACE);
-        LinearLayout.LayoutParams incidentParams = matchWrap();
-        incidentParams.topMargin = dp(8);
-        root.addView(incidentsText, incidentParams);
-
-        return scroll;
-    }
-
-    private TextView addStatus(LinearLayout parent, String label) {
-        LinearLayout block = new LinearLayout(this);
-        block.setOrientation(LinearLayout.VERTICAL);
-        block.setPadding(dp(14), dp(12), dp(14), dp(12));
-
-        TextView key = new TextView(this);
-        key.setText(label);
-        key.setTextSize(13f);
-        block.addView(key);
-
-        TextView value = new TextView(this);
-        value.setTextSize(18f);
-        value.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        LinearLayout.LayoutParams valueParams = matchWrap();
-        valueParams.topMargin = dp(3);
-        block.addView(value, valueParams);
-
-        LinearLayout.LayoutParams blockParams = matchWrap();
-        blockParams.bottomMargin = dp(6);
-        parent.addView(block, blockParams);
-        return value;
+        LinearLayout.LayoutParams logParams = matchWrap();
+        logParams.topMargin = dp(16);
+        log.addView(incidentsText, logParams);
+        return ui.root;
     }
 
     private void toggleMonitoring() {
@@ -316,15 +244,15 @@ public final class MainActivity extends Activity {
         boolean running = WatchdogService.isRunningInProcess();
         HealthStateMachine.State state = stateStore.monitorState();
 
-        watchdogValue.setText(powerBlocked ? "절전모드 · 자동복구 일시정지"
-                : !enabled ? "중지됨" : running ? "실행 중" : "시작 대기");
+        ui.status(watchdogValue, powerBlocked ? "절전모드 · 자동복구 일시정지"
+                : !enabled ? "중지됨" : running ? "실행 중" : "시작 대기", enabled && running && !powerBlocked, powerBlocked);
         termuxValue.setText(enabled
                 ? termuxText(state)
                 : "감시 중지 · 마지막 " + termuxText(state));
         driveWorkerValue.setText(enabled
                 ? driveWorkerText(state)
                 : "감시 중지 · 마지막 " + driveWorkerText(state));
-        failuresValue.setText(String.valueOf(stateStore.consecutiveFailures()));
+        failuresValue.setText(stateStore.consecutiveFailures() + "회");
         boolean exactAlarmReady = AlarmScheduler.canScheduleExactAlarms(this);
         backupAlarmValue.setText(exactAlarmReady
                 ? "사용 가능"
@@ -380,7 +308,7 @@ public final class MainActivity extends Activity {
         String nativeStatus;
         switch (nativeAuth.auth.state()) {
             case "ready": nativeStatus = "최근 Google 인증 요청 성공"; break;
-            case "reauth_required": nativeStatus = "Google 재인증 필요 · 위 버튼에서 확인"; break;
+            case "reauth_required": nativeStatus = "Google 재인증 필요 · 아래 버튼에서 확인"; break;
             case "not_configured": nativeStatus = "Google 앱 인증 설정 확인 필요"; break;
             case "unavailable": nativeStatus = "Google 인증 연결 확인 필요"; break;
             default: nativeStatus = "Google 인증은 요청 시 확인합니다.";
@@ -473,6 +401,7 @@ public final class MainActivity extends Activity {
 
     @Override protected void onSaveInstanceState(Bundle outState) {
         outState.putBoolean("google_consent_pending", consentPending);
+        outState.putInt("selected_page", ui == null ? selectedPage : ui.selectedPage());
         super.onSaveInstanceState(outState);
     }
 

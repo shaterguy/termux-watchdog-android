@@ -66,7 +66,7 @@ public final class StaticSecurityTest {
         assertTrue(scheduler.contains("PendingIntent.FLAG_IMMUTABLE"));
         assertTrue(receiver.contains("WatchdogService.requestStart(context)"));
         assertTrue(activity.contains("Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM"));
-        assertTrue(activity.contains("백업 자동재기동 권한"));
+        assertTrue(activity.contains("자동 재기동 권한"));
         assertTrue(activity.contains("장애 시 자동 재기동 보장 안 됨"));
     }
 
@@ -121,7 +121,7 @@ public final class StaticSecurityTest {
         assertTrue(activity.contains("Watchdog 시작"));
         assertTrue(activity.contains("Termux 실행환경"));
         assertTrue(activity.contains("Drive Worker"));
-        assertTrue(activity.contains("최근 장애 로그"));
+        assertTrue(activity.contains("장애 기록"));
         assertFalse(activity.contains("SM-S931N"));
         assertFalse(activity.contains("Galaxy S25"));
     }

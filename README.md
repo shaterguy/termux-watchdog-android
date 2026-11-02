@@ -2,7 +2,7 @@
 
 Android watchdog app that monitors the local Termux service environment and invokes one fixed recovery entry point when repeated health failures indicate that recovery is required.
 
-Current development version: `0.1.0-dev9`.
+Current development version: `0.1.0-dev13`.
 
 This development APK updates the existing `com.shaterguy.termuxwatchdog` app.
 Successive development versions retain the original package and dedicated signing
@@ -97,3 +97,11 @@ use an Android Debug key, or transfer private signing material.
 Binder callbacks check the ONEWAY bit, while request endpoints require that bit to be clear. Additional platform transport flags no longer reject otherwise verified calls. UID/current-signer, parcel bounds, nonce, schema and session deadlines are unchanged. Both the APK and standalone DEX must be updated.
 
 Host regression: `python3 tools/test_binder_flags.py` compiles the exact admission expressions and checks transport flags, wrong-direction calls, unverified peers and existing guard bounds.
+
+## Dev13 native interface
+
+Based on the dev12 snapshot, the app separates 상태 (Status), 연결 (Connection),
+and 기록 (History), puts monitoring health first, and adapts navigation/columns
+to larger screens. System dark appearance, scalable text and system insets are
+respected. Existing monitoring, power and authorization contracts are unchanged.
+See [UI design and acceptance](docs/ui-dev13.md).
