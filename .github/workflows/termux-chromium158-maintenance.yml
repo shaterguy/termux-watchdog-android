@@ -20,7 +20,8 @@ jobs:
     timeout-minutes: 350
     env:
       PACKAGING_COMMIT: 07f9482c02535417719d7f6398f649d4bc176a1c
-      TERMUX_BUILDER_IMAGE_NAME: ghcr.io/termux/package-builder@sha256:e2de051a518d8b188c59c4a1ecf357d373b9ccf48d6c06d7681fdc3f61a77287
+      BASE_TERMUX_BUILDER_IMAGE: ghcr.io/termux/package-builder@sha256:e2de051a518d8b188c59c4a1ecf357d373b9ccf48d6c06d7681fdc3f61a77287
+      TERMUX_BUILDER_IMAGE_NAME: chromium158-maintenance-with-ccache:local
       CONTAINER_NAME: chromium158-host-tools
     steps:
       - name: Pin the public upstream source and materialize the reviewed repair
@@ -440,7 +441,7 @@ jobs:
             *) exit 2 ;;
           esac
           mkdir -p output/maintenance-diagnostics output/delivery
-          export CCACHE_DIR="$PWD/maintenance-ccache"
+          export CCACHE_DIR="$PWD/output/maintenance-ccache"
           export CCACHE_MAXSIZE=1900MB
           export CCACHE_COMPILERCHECK=content
           export CCACHE_BASEDIR=/home/builder
@@ -454,7 +455,9 @@ jobs:
           if test "${NATIVE_CCACHE_RESTORED:-}" = true; then export CCACHE_READONLY=1; fi
           printf '%s\n' "${NATIVE_CCACHE_RESTORED:-false}" > output/maintenance-diagnostics/ccache-restored.txt
           test "$(git rev-parse HEAD)" = 07f9482c02535417719d7f6398f649d4bc176a1c
-          /usr/bin/python3 maintenance-inputs/apply-recovery.py "$PWD" > output/maintenance-diagnostics/source-patch.json
+          # The official restricted profile makes trusted repository scripts immutable.
+          # The host applied the reviewed patch before starting this confined container.
+          sha256sum --check maintenance-inputs/prepared.sha256 > output/maintenance-diagnostics/prepared-source-check.txt
           git diff --check
           git diff -- x11-packages/chromium/build.sh x11-packages/chromium-host-tools/build.sh > output/maintenance-diagnostics/recipes.patch
           dpkg --validate-version '158.0.8127.36-0~termuxlocal1'
@@ -496,37 +499,81 @@ jobs:
           cat output/maintenance-diagnostics/package-verification.json
           CHROMIUM_MAINTENANCE_EOF
           sha256sum termux-packages/maintenance-inputs/* > diagnostic/maintenance-inputs.sha256
-      - name: Start the fixed builder before applying the official ephemeral cleanup
+          mkdir -p termux-packages/output/maintenance-diagnostics
+          python3 termux-packages/maintenance-inputs/apply-recovery.py termux-packages > termux-packages/output/maintenance-diagnostics/source-patch.json
+          git -C termux-packages diff --check
+          (
+            cd termux-packages
+            sha256sum x11-packages/chromium/build.sh x11-packages/chromium-host-tools/build.sh \
+              maintenance/chromium158/*.py maintenance-inputs/*.py maintenance-inputs/build-stage.sh > maintenance-inputs/prepared.sha256
+          )
+          cp termux-packages/maintenance-inputs/prepared.sha256 diagnostic/prepared.sha256
+      - name: Add ccache to the pinned parent image before starting the confined builder
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          mkdir -p diagnostic/ccache-image-context
+          cat > diagnostic/ccache-image-context/Dockerfile <<'CCACHE_IMAGE_EOF'
+          ARG BASE_IMAGE
+          FROM ${BASE_IMAGE}
+          USER root
+          RUN set -eux; \
+              mkdir -p /usr/local/share/chromium158-maintenance-image; \
+              dpkg-query -W -f='${Package} ${Version}\n' > /usr/local/share/chromium158-maintenance-image/packages-before.txt; \
+              apt-get update; \
+              DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends --no-remove -y ccache; \
+              dpkg-query -W -f='${Package} ${Version}\n' > /usr/local/share/chromium158-maintenance-image/packages-after.txt; \
+              ccache --version > /usr/local/share/chromium158-maintenance-image/ccache-version.txt; \
+              apt-get clean; \
+              rm -rf /var/lib/apt/lists/*
+          USER builder:builder
+          CCACHE_IMAGE_EOF
+          docker pull --platform linux/amd64 "$BASE_TERMUX_BUILDER_IMAGE"
+          docker image inspect "$BASE_TERMUX_BUILDER_IMAGE" > diagnostic/parent-image.json
+          docker build --pull=false --platform linux/amd64 \
+            --build-arg BASE_IMAGE="$BASE_TERMUX_BUILDER_IMAGE" \
+            --label org.opencontainers.image.base.name="$BASE_TERMUX_BUILDER_IMAGE" \
+            --iidfile diagnostic/derived-image.id --tag "$TERMUX_BUILDER_IMAGE_NAME" \
+            diagnostic/ccache-image-context 2>&1 | tee diagnostic/ccache-image-build.log
+          docker image inspect "$TERMUX_BUILDER_IMAGE_NAME" > diagnostic/derived-image.json
+          test "$(docker image inspect --format '{{.Id}}' "$TERMUX_BUILDER_IMAGE_NAME")" = "$(cat diagnostic/derived-image.id)"
+      - name: Start the confined builder before applying the official ephemeral cleanup
         shell: bash
         working-directory: termux-packages
         run: |
           set -euo pipefail
           test "$(uname -m)" = x86_64
-          docker pull --platform linux/amd64 "$TERMUX_BUILDER_IMAGE_NAME"
           CI=true ./scripts/run-docker.sh /bin/bash -lc 'set -euo pipefail; uname -m; /usr/bin/python3 --version; dpkg --version' > ../diagnostic/container-toolchain.txt 2>&1
           docker inspect "$CONTAINER_NAME" --format '{{json .Config.Image}}' > ../diagnostic/container-image.json
-          CI=true ./scripts/free-space.sh > ../diagnostic/ephemeral-space-cleanup.log 2>&1
-          test "$(docker inspect "$CONTAINER_NAME" --format '{{.State.Running}}')" = true
-      - name: Install the compiler-cache tool inside the disposable builder only
-        shell: bash
-        run: |
-          set -euo pipefail
+          test "$(docker inspect "$CONTAINER_NAME" --format '{{.Image}}')" = "$(cat ../diagnostic/derived-image.id)"
           docker exec "$CONTAINER_NAME" /bin/bash -lc '
             set -euo pipefail
-            if ! command -v ccache >/dev/null; then
-              sudo apt-get update
-              sudo apt-get install --no-install-recommends -y ccache
-            fi
-            command -v ccache
+            test "$(id -un)" = builder
+            test "$(id -u)" -ne 0
+            cat /proc/self/attr/current
+            test "$(command -v ccache)" = /usr/bin/ccache
             ccache --version
-            dpkg-query -W -f="\${Package} \${Version}\n" ccache
-          ' > diagnostic/ccache-package.txt 2>&1
+            sha256sum --check maintenance-inputs/prepared.sha256
+            touch output/maintenance-diagnostics/.confined-write-probe
+            rm output/maintenance-diagnostics/.confined-write-probe
+          ' > ../diagnostic/confined-builder-probe.txt 2>&1
+          grep -F "_custom-termux-package-builder-$CONTAINER_NAME (enforce)" ../diagnostic/confined-builder-probe.txt
+          docker cp "$CONTAINER_NAME:/usr/local/share/chromium158-maintenance-image" ../diagnostic/derived-package-records
+          LC_ALL=C sort ../diagnostic/derived-package-records/packages-before.txt > ../diagnostic/packages-before-sorted.txt
+          LC_ALL=C sort ../diagnostic/derived-package-records/packages-after.txt > ../diagnostic/packages-after-sorted.txt
+          comm -13 ../diagnostic/packages-before-sorted.txt ../diagnostic/packages-after-sorted.txt > ../diagnostic/added-or-updated-packages.txt
+          comm -23 ../diagnostic/packages-before-sorted.txt ../diagnostic/packages-after-sorted.txt > ../diagnostic/removed-or-replaced-packages.txt
+          test ! -s ../diagnostic/removed-or-replaced-packages.txt
+          grep -E '^ccache [^ ]+$' ../diagnostic/added-or-updated-packages.txt
+          CI=true ./scripts/free-space.sh > ../diagnostic/ephemeral-space-cleanup.log 2>&1
+          test "$(docker inspect "$CONTAINER_NAME" --format '{{.State.Running}}')" = true
       - name: Restore this stage's bounded compiler cache
         id: native-cache
         continue-on-error: true
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
-          path: termux-packages/maintenance-ccache
+          path: termux-packages/output/maintenance-ccache
           key: native-chromium158-07f9482c-e2de051a-host-tools-ccache-v1
 
       - name: Reserve job-local swap and verify this fresh runner's remaining capacity
@@ -576,10 +623,10 @@ jobs:
           df -B1 -a > diagnostic/df-after-build.txt
           free -b > diagnostic/memory-after-build.txt
           if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
-            if docker exec "$CONTAINER_NAME" test -d /home/builder/termux-packages/maintenance-ccache; then
-              docker exec --env CCACHE_DIR=/home/builder/termux-packages/maintenance-ccache --env CCACHE_MAXSIZE=1900MB "$CONTAINER_NAME" /usr/bin/ccache --cleanup
-              docker exec --env CCACHE_DIR=/home/builder/termux-packages/maintenance-ccache "$CONTAINER_NAME" /usr/bin/ccache --show-stats --verbose > diagnostic/ccache-final.txt
-              cache_bytes=$(du -sb termux-packages/maintenance-ccache | cut -f1)
+            if docker exec "$CONTAINER_NAME" test -d /home/builder/termux-packages/output/maintenance-ccache; then
+              docker exec --env CCACHE_DIR=/home/builder/termux-packages/output/maintenance-ccache --env CCACHE_MAXSIZE=1900MB "$CONTAINER_NAME" /usr/bin/ccache --cleanup
+              docker exec --env CCACHE_DIR=/home/builder/termux-packages/output/maintenance-ccache "$CONTAINER_NAME" /usr/bin/ccache --show-stats --verbose > diagnostic/ccache-final.txt
+              cache_bytes=$(du -sb termux-packages/output/maintenance-ccache | cut -f1)
               test "$cache_bytes" -le 2000000000
               jq -n --argjson bytes "$cache_bytes" '{cache_bytes:$bytes,max_bytes:2000000000,kind:"C/C++ compiler results only",complete_build_tree:false}' > diagnostic/ccache-checkpoint.json
               echo 'ready=true' >> "$GITHUB_OUTPUT"
@@ -608,7 +655,7 @@ jobs:
         continue-on-error: true
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
-          path: termux-packages/maintenance-ccache
+          path: termux-packages/output/maintenance-ccache
           key: native-chromium158-07f9482c-e2de051a-host-tools-ccache-v1
 
       - name: Preserve build logs even when compilation or validation failed
@@ -626,7 +673,8 @@ jobs:
     timeout-minutes: 350
     env:
       PACKAGING_COMMIT: 07f9482c02535417719d7f6398f649d4bc176a1c
-      TERMUX_BUILDER_IMAGE_NAME: ghcr.io/termux/package-builder@sha256:e2de051a518d8b188c59c4a1ecf357d373b9ccf48d6c06d7681fdc3f61a77287
+      BASE_TERMUX_BUILDER_IMAGE: ghcr.io/termux/package-builder@sha256:e2de051a518d8b188c59c4a1ecf357d373b9ccf48d6c06d7681fdc3f61a77287
+      TERMUX_BUILDER_IMAGE_NAME: chromium158-maintenance-with-ccache:local
       CONTAINER_NAME: chromium158-browser
     steps:
       - name: Pin the public upstream source and materialize the reviewed repair
@@ -1046,7 +1094,7 @@ jobs:
             *) exit 2 ;;
           esac
           mkdir -p output/maintenance-diagnostics output/delivery
-          export CCACHE_DIR="$PWD/maintenance-ccache"
+          export CCACHE_DIR="$PWD/output/maintenance-ccache"
           export CCACHE_MAXSIZE=1900MB
           export CCACHE_COMPILERCHECK=content
           export CCACHE_BASEDIR=/home/builder
@@ -1060,7 +1108,9 @@ jobs:
           if test "${NATIVE_CCACHE_RESTORED:-}" = true; then export CCACHE_READONLY=1; fi
           printf '%s\n' "${NATIVE_CCACHE_RESTORED:-false}" > output/maintenance-diagnostics/ccache-restored.txt
           test "$(git rev-parse HEAD)" = 07f9482c02535417719d7f6398f649d4bc176a1c
-          /usr/bin/python3 maintenance-inputs/apply-recovery.py "$PWD" > output/maintenance-diagnostics/source-patch.json
+          # The official restricted profile makes trusted repository scripts immutable.
+          # The host applied the reviewed patch before starting this confined container.
+          sha256sum --check maintenance-inputs/prepared.sha256 > output/maintenance-diagnostics/prepared-source-check.txt
           git diff --check
           git diff -- x11-packages/chromium/build.sh x11-packages/chromium-host-tools/build.sh > output/maintenance-diagnostics/recipes.patch
           dpkg --validate-version '158.0.8127.36-0~termuxlocal1'
@@ -1102,42 +1152,86 @@ jobs:
           cat output/maintenance-diagnostics/package-verification.json
           CHROMIUM_MAINTENANCE_EOF
           sha256sum termux-packages/maintenance-inputs/* > diagnostic/maintenance-inputs.sha256
+          mkdir -p termux-packages/output/maintenance-diagnostics
+          python3 termux-packages/maintenance-inputs/apply-recovery.py termux-packages > termux-packages/output/maintenance-diagnostics/source-patch.json
+          git -C termux-packages diff --check
+          (
+            cd termux-packages
+            sha256sum x11-packages/chromium/build.sh x11-packages/chromium-host-tools/build.sh \
+              maintenance/chromium158/*.py maintenance-inputs/*.py maintenance-inputs/build-stage.sh > maintenance-inputs/prepared.sha256
+          )
+          cp termux-packages/maintenance-inputs/prepared.sha256 diagnostic/prepared.sha256
       - name: Download this run's exact 158 host-tools package and payload manifest
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: chromium158-host-tools-${{ github.run_id }}
           path: termux-packages/output/host-tools-input
-      - name: Start the fixed builder before applying the official ephemeral cleanup
+      - name: Add ccache to the pinned parent image before starting the confined builder
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          mkdir -p diagnostic/ccache-image-context
+          cat > diagnostic/ccache-image-context/Dockerfile <<'CCACHE_IMAGE_EOF'
+          ARG BASE_IMAGE
+          FROM ${BASE_IMAGE}
+          USER root
+          RUN set -eux; \
+              mkdir -p /usr/local/share/chromium158-maintenance-image; \
+              dpkg-query -W -f='${Package} ${Version}\n' > /usr/local/share/chromium158-maintenance-image/packages-before.txt; \
+              apt-get update; \
+              DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends --no-remove -y ccache; \
+              dpkg-query -W -f='${Package} ${Version}\n' > /usr/local/share/chromium158-maintenance-image/packages-after.txt; \
+              ccache --version > /usr/local/share/chromium158-maintenance-image/ccache-version.txt; \
+              apt-get clean; \
+              rm -rf /var/lib/apt/lists/*
+          USER builder:builder
+          CCACHE_IMAGE_EOF
+          docker pull --platform linux/amd64 "$BASE_TERMUX_BUILDER_IMAGE"
+          docker image inspect "$BASE_TERMUX_BUILDER_IMAGE" > diagnostic/parent-image.json
+          docker build --pull=false --platform linux/amd64 \
+            --build-arg BASE_IMAGE="$BASE_TERMUX_BUILDER_IMAGE" \
+            --label org.opencontainers.image.base.name="$BASE_TERMUX_BUILDER_IMAGE" \
+            --iidfile diagnostic/derived-image.id --tag "$TERMUX_BUILDER_IMAGE_NAME" \
+            diagnostic/ccache-image-context 2>&1 | tee diagnostic/ccache-image-build.log
+          docker image inspect "$TERMUX_BUILDER_IMAGE_NAME" > diagnostic/derived-image.json
+          test "$(docker image inspect --format '{{.Id}}' "$TERMUX_BUILDER_IMAGE_NAME")" = "$(cat diagnostic/derived-image.id)"
+      - name: Start the confined builder before applying the official ephemeral cleanup
         shell: bash
         working-directory: termux-packages
         run: |
           set -euo pipefail
           test "$(uname -m)" = x86_64
-          docker pull --platform linux/amd64 "$TERMUX_BUILDER_IMAGE_NAME"
           CI=true ./scripts/run-docker.sh /bin/bash -lc 'set -euo pipefail; uname -m; /usr/bin/python3 --version; dpkg --version' > ../diagnostic/container-toolchain.txt 2>&1
           docker inspect "$CONTAINER_NAME" --format '{{json .Config.Image}}' > ../diagnostic/container-image.json
-          CI=true ./scripts/free-space.sh > ../diagnostic/ephemeral-space-cleanup.log 2>&1
-          test "$(docker inspect "$CONTAINER_NAME" --format '{{.State.Running}}')" = true
-      - name: Install the compiler-cache tool inside the disposable builder only
-        shell: bash
-        run: |
-          set -euo pipefail
+          test "$(docker inspect "$CONTAINER_NAME" --format '{{.Image}}')" = "$(cat ../diagnostic/derived-image.id)"
           docker exec "$CONTAINER_NAME" /bin/bash -lc '
             set -euo pipefail
-            if ! command -v ccache >/dev/null; then
-              sudo apt-get update
-              sudo apt-get install --no-install-recommends -y ccache
-            fi
-            command -v ccache
+            test "$(id -un)" = builder
+            test "$(id -u)" -ne 0
+            cat /proc/self/attr/current
+            test "$(command -v ccache)" = /usr/bin/ccache
             ccache --version
-            dpkg-query -W -f="\${Package} \${Version}\n" ccache
-          ' > diagnostic/ccache-package.txt 2>&1
+            sha256sum --check maintenance-inputs/prepared.sha256
+            touch output/maintenance-diagnostics/.confined-write-probe
+            rm output/maintenance-diagnostics/.confined-write-probe
+          ' > ../diagnostic/confined-builder-probe.txt 2>&1
+          grep -F "_custom-termux-package-builder-$CONTAINER_NAME (enforce)" ../diagnostic/confined-builder-probe.txt
+          docker cp "$CONTAINER_NAME:/usr/local/share/chromium158-maintenance-image" ../diagnostic/derived-package-records
+          LC_ALL=C sort ../diagnostic/derived-package-records/packages-before.txt > ../diagnostic/packages-before-sorted.txt
+          LC_ALL=C sort ../diagnostic/derived-package-records/packages-after.txt > ../diagnostic/packages-after-sorted.txt
+          comm -13 ../diagnostic/packages-before-sorted.txt ../diagnostic/packages-after-sorted.txt > ../diagnostic/added-or-updated-packages.txt
+          comm -23 ../diagnostic/packages-before-sorted.txt ../diagnostic/packages-after-sorted.txt > ../diagnostic/removed-or-replaced-packages.txt
+          test ! -s ../diagnostic/removed-or-replaced-packages.txt
+          grep -E '^ccache [^ ]+$' ../diagnostic/added-or-updated-packages.txt
+          CI=true ./scripts/free-space.sh > ../diagnostic/ephemeral-space-cleanup.log 2>&1
+          test "$(docker inspect "$CONTAINER_NAME" --format '{{.State.Running}}')" = true
       - name: Restore this stage's bounded compiler cache
         id: native-cache
         continue-on-error: true
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
-          path: termux-packages/maintenance-ccache
+          path: termux-packages/output/maintenance-ccache
           key: native-chromium158-07f9482c-e2de051a-browser-ccache-v1
 
       - name: Reserve job-local swap and verify this fresh runner's remaining capacity
@@ -1187,10 +1281,10 @@ jobs:
           df -B1 -a > diagnostic/df-after-build.txt
           free -b > diagnostic/memory-after-build.txt
           if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
-            if docker exec "$CONTAINER_NAME" test -d /home/builder/termux-packages/maintenance-ccache; then
-              docker exec --env CCACHE_DIR=/home/builder/termux-packages/maintenance-ccache --env CCACHE_MAXSIZE=1900MB "$CONTAINER_NAME" /usr/bin/ccache --cleanup
-              docker exec --env CCACHE_DIR=/home/builder/termux-packages/maintenance-ccache "$CONTAINER_NAME" /usr/bin/ccache --show-stats --verbose > diagnostic/ccache-final.txt
-              cache_bytes=$(du -sb termux-packages/maintenance-ccache | cut -f1)
+            if docker exec "$CONTAINER_NAME" test -d /home/builder/termux-packages/output/maintenance-ccache; then
+              docker exec --env CCACHE_DIR=/home/builder/termux-packages/output/maintenance-ccache --env CCACHE_MAXSIZE=1900MB "$CONTAINER_NAME" /usr/bin/ccache --cleanup
+              docker exec --env CCACHE_DIR=/home/builder/termux-packages/output/maintenance-ccache "$CONTAINER_NAME" /usr/bin/ccache --show-stats --verbose > diagnostic/ccache-final.txt
+              cache_bytes=$(du -sb termux-packages/output/maintenance-ccache | cut -f1)
               test "$cache_bytes" -le 2000000000
               jq -n --argjson bytes "$cache_bytes" '{cache_bytes:$bytes,max_bytes:2000000000,kind:"C/C++ compiler results only",complete_build_tree:false}' > diagnostic/ccache-checkpoint.json
               echo 'ready=true' >> "$GITHUB_OUTPUT"
@@ -1219,7 +1313,7 @@ jobs:
         continue-on-error: true
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
-          path: termux-packages/maintenance-ccache
+          path: termux-packages/output/maintenance-ccache
           key: native-chromium158-07f9482c-e2de051a-browser-ccache-v1
 
       - name: Preserve build logs even when compilation or validation failed
