@@ -54,6 +54,9 @@ jobs:
           docker pull --platform linux/amd64 "$BUILDER_IMAGE"
           docker image inspect "$BUILDER_IMAGE" --format '{{json .RepoDigests}}' > diagnostic/builder-digests.json
           docker image inspect "$BUILDER_IMAGE" --format '{{.Architecture}} {{.Os}} {{.Size}}' > diagnostic/builder-platform.txt
+          # Match official CI: instantiate the pinned image before its compressed content is cleaned.
+          docker run --detach --name chromium158-maintenance-probe --platform linux/amd64 --entrypoint /bin/sleep "$BUILDER_IMAGE" infinity > diagnostic/container-id.txt
+          docker inspect chromium158-maintenance-probe --format '{{json .Config.Image}}' > diagnostic/container-image.json
           # This pinned official script acts only on this disposable Actions VM.
           # It is never sent to either Termux device.
           (cd termux-packages && CI=true ./scripts/free-space.sh) > diagnostic/ephemeral-space-cleanup.log 2>&1
@@ -67,7 +70,8 @@ jobs:
             awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/ { print }' /proc/meminfo
             df -B1 --output=source,size,used,avail,target /
           } > diagnostic/host-after.txt
-          docker run --rm --platform linux/amd64 --entrypoint /bin/bash "$BUILDER_IMAGE" -lc '
+          test "$(docker inspect chromium158-maintenance-probe --format '{{.State.Running}}')" = true
+          docker exec chromium158-maintenance-probe /bin/bash -lc '
             set -euo pipefail
             uname -m
             command -v python3
@@ -79,17 +83,17 @@ jobs:
           lsblk -b -J -o NAME,PATH,SIZE,TYPE,FSTYPE,MOUNTPOINTS,PKNAME,RO > diagnostic/lsblk-after.json
           df -B1 -a > diagnostic/df-all-after.txt
           findmnt --json -o TARGET,SOURCE,FSTYPE,OPTIONS > diagnostic/findmnt-after.json
-          python3 - <<'PYV' > diagnostic/work-volumes.json
-          import json,os,pathlib
-          rows=[]
-          for value in dict.fromkeys(['/', '/mnt', os.environ['GITHUB_WORKSPACE'], os.environ['RUNNER_TEMP']]):
-              p=pathlib.Path(value); row={'path':value,'exists':p.exists()}
-              if p.exists():
-                  st=p.stat(); fs=os.statvfs(p)
-                  row.update(device_id=st.st_dev,total_bytes=fs.f_blocks*fs.f_frsize,available_bytes=fs.f_bavail*fs.f_frsize,realpath=str(p.resolve()))
-              rows.append(row)
-          print(json.dumps({'filesystem_records':rows,'volumes_created_or_reconfigured':False},indent=2))
-          PYV
+          # Host Python is deliberately removed by the official cleanup; use coreutils and jq.
+          for target in / /mnt "$GITHUB_WORKSPACE" "$RUNNER_TEMP"; do
+            if test -e "$target"; then
+              device=$(stat -L -c '%d' "$target")
+              read -r block_size total_blocks available_blocks < <(stat -L -f -c '%S %b %a' "$target")
+              jq -n --arg path "$target" --argjson device "$device" --argjson unit "$block_size" --argjson total "$total_blocks" --argjson available "$available_blocks" \
+                '{path:$path,exists:true,device_id:$device,total_bytes:($unit*$total),available_bytes:($unit*$available)}'
+            else
+              jq -n --arg path "$target" '{path:$path,exists:false}'
+            fi
+          done | jq -s '{filesystem_records:.,measurement:"GNU stat filesystem counters",volumes_created_or_reconfigured:false}' > diagnostic/work-volumes.json
           disk_available=$(df -B1 --output=avail / | tail -n 1 | tr -d ' ')
           memory_total=$(awk '/^MemTotal:/ { printf "%.0f", $2 * 1024 }' /proc/meminfo)
           cpu_count=$(nproc)
@@ -99,6 +103,18 @@ jobs:
             '{disk_available_bytes:$disk,memory_total_bytes:$memory,cpu_count:$cpu,minimum_disk_bytes:100000000000,recommended_disk_bytes:107374182400,meets_recommended_disk:($disk>=107374182400),minimum_memory_bytes:8000000000,environment_guard:($disk>=100000000000 and $memory>=8000000000 and $cpu>=2),full_build_attempted:false,artifact_installed:false}' > diagnostic/summary.json
           cat diagnostic/summary.json
           jq -e '.environment_guard' diagnostic/summary.json
+      - name: Remove only this job's probe container
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if docker container inspect chromium158-maintenance-probe >/dev/null 2>&1; then
+            docker inspect chromium158-maintenance-probe --format '{{json .State}}' > diagnostic/container-state-before-removal.json
+            docker rm --force chromium158-maintenance-probe > diagnostic/container-removal.txt
+            if docker container inspect chromium158-maintenance-probe >/dev/null 2>&1; then
+              exit 1
+            fi
+          fi
       - name: Preserve the diagnostic receipt even if a measurement failed
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
