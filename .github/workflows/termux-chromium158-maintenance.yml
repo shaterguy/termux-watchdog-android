@@ -1,4 +1,4 @@
-name: Inspect public Chromium 158 Termux build environment
+name: Diagnose the exact Chromium 158 host Python
 
 on:
   push:
@@ -11,115 +11,229 @@ permissions:
   contents: read
 
 concurrency:
-  group: chromium158-public-preflight-${{ github.ref }}
+  group: chromium158-public-python-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  inspect:
+  inspect-python:
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     env:
-      PACKAGING_COMMIT: 07f9482c02535417719d7f6398f649d4bc176a1c
       BUILDER_IMAGE: ghcr.io/termux/package-builder@sha256:e2de051a518d8b188c59c4a1ecf357d373b9ccf48d6c06d7681fdc3f61a77287
     steps:
-      - name: Record the actual standard runner and pin the public recipe
+      - name: Materialize the reviewed public-source diagnostic helpers
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p probe diagnostic
+          cat > probe/host-python-preflight.py <<'CHROMIUM_MAINTENANCE_EOF'
+          #!/usr/bin/env python3
+          """Diagnose Chromium's exact host Python, then restore its DEPS pin if needed.
+          
+          Run only inside the fixed official x86_64 Termux builder container. This helper
+          never substitutes the container system Python for Chromium's build interpreter.
+          The system Python runs only this diagnostic/bootstrap helper.
+          """
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import platform
+          import re
+          import subprocess
+          import sys
+          
+          EXPECTED_CIPD_PACKAGE = 'infra/3pp/tools/cpython3/linux-amd64'
+          EXPECTED_CIPD_VERSION = 'version:3@3.11.9.chromium.38'
+          EXPECTED_PYTHON_VERSION = [3, 11, 9]
+          
+          def run(argv, cwd, *, stdin=None, timeout=60):
+              try:
+                  result = subprocess.run([str(x) for x in argv], cwd=cwd, input=stdin,
+                                          capture_output=True, text=True, timeout=timeout)
+                  return {'argv': [str(x) for x in argv], 'returncode': result.returncode,
+                          'stdout': result.stdout, 'stderr': result.stderr}
+              except (OSError, subprocess.TimeoutExpired) as error:
+                  return {'argv': [str(x) for x in argv], 'returncode': None,
+                          'error_type': type(error).__name__, 'errno': getattr(error, 'errno', None),
+                          'error': str(error)}
+          
+          def save(path, value):
+              path.write_text(json.dumps(value, indent=2) + '\n')
+          
+          def probe(candidate, source, build_dir):
+              result = {'path': str(candidate), 'exists': candidate.exists(),
+                        'symlink': candidate.is_symlink(), 'resolved_path': str(candidate.resolve()),
+                        'cwd': str(build_dir), 'platform': platform.machine(),
+                        'environment_paths': {key: os.environ.get(key) for key in
+                                              ['LD_LIBRARY_PATH', 'LD_PRELOAD', 'PYTHONHOME', 'PYTHONPATH']}}
+              result['file'] = run(['file', '-L', str(candidate)], build_dir)
+              result['elf_headers'] = run(['readelf', '--wide', '--file-header', '--program-headers', str(candidate)], build_dir)
+              headers = result['elf_headers'].get('stdout', '')
+              interpreter = re.search(r'Requesting program interpreter: ([^\]]+)\]', headers)
+              if interpreter:
+                  loader = Path(interpreter.group(1))
+                  result['elf_interpreter'] = {'path': str(loader), 'exists': loader.exists(),
+                                               'resolved_path': str(loader.resolve())}
+              result['ldd'] = run(['ldd', str(candidate)], build_dir)
+              result['version'] = run([candidate, '--version'], build_dir)
+              result['runtime_identity'] = run([candidate, '-c',
+                  'import json,platform,sys; print(json.dumps({"version":list(sys.version_info[:3]),"machine":platform.machine(),"executable":sys.executable}))'], build_dir)
+              result['concurrent_links'] = run([candidate, source / 'build/toolchain/get_concurrent_links.py', '--mem_per_link_gb=3'], build_dir)
+              try:
+                  identity = json.loads(result['runtime_identity'].get('stdout', ''))
+              except (ValueError, TypeError):
+                  identity = {}
+              result['passed'] = (result['elf_headers'].get('returncode') == 0
+                                  and 'Advanced Micro Devices X86-64' in headers
+                                  and identity.get('version') == EXPECTED_PYTHON_VERSION
+                                  and identity.get('machine') == 'x86_64'
+                                  and result['version'].get('returncode') == 0
+                                  and result['concurrent_links'].get('returncode') == 0)
+              if candidate.is_file():
+                  result['executable_sha256'] = hashlib.sha256(candidate.read_bytes()).hexdigest()
+              return result
+          
+          def main():
+              assert len(sys.argv) == 6, 'source cache cipd-executable diagnostic-directory build-directory required'
+              source, cache, cipd, diagnostic, build_dir = [Path(value).resolve() for value in sys.argv[1:]]
+              assert platform.system() == 'Linux' and platform.machine() == 'x86_64'
+              assert source.is_dir() and cache.is_dir() and build_dir.is_dir()
+              diagnostic.mkdir(parents=True, exist_ok=True)
+              deps = (source / 'DEPS').read_text()
+              version = re.search(r'''['"]cpython3_version['"]\s*:\s*['"]([^'"]+)['"]''', deps)
+              assert version and version.group(1) == EXPECTED_CIPD_VERSION, 'unexpected CPython DEPS pin'
+              script = source / 'build/toolchain/get_concurrent_links.py'
+              save(diagnostic / 'source-identity.json', {
+                  'deps_sha256': hashlib.sha256((source / 'DEPS').read_bytes()).hexdigest(),
+                  'concurrent_links_sha256': hashlib.sha256(script.read_bytes()).hexdigest(),
+                  'cipd_package': EXPECTED_CIPD_PACKAGE, 'cipd_version': EXPECTED_CIPD_VERSION,
+                  'container_system_python_used_only_for_diagnostic_helper': sys.executable,
+              })
+              original = source / 'third_party/cpython3/host/bin/python3'
+              original_result = probe(original, source, build_dir)
+              save(diagnostic / 'original-python.json', original_result)
+              selected = original
+              selected_origin = 'verified official source-tarball host interpreter'
+              if not original_result['passed']:
+                  # Keep the original tree intact so missing files, ELF loader or library
+                  # errors remain inspectable. Install only the exact public DEPS package
+                  # into a separate build cache and record its fully resolved instance pin.
+                  assert cipd.is_file() and os.access(cipd, os.X_OK), 'depot_tools CIPD client unavailable'
+                  restored = cache / 'maintenance-cpython'
+                  resolved = diagnostic / 'cpython-resolved.ensure'
+                  manifest = EXPECTED_CIPD_PACKAGE + ' ' + EXPECTED_CIPD_VERSION + '\n'
+                  ensured = run([cipd, 'ensure', '-root', restored, '-ensure-file', '-',
+                                 '-ensure-file-output', resolved], build_dir, stdin=manifest, timeout=300)
+                  save(diagnostic / 'cipd-ensure.json', ensured)
+                  assert ensured.get('returncode') == 0, 'pinned CIPD bootstrap failed; GN not started'
+                  assert resolved.is_file() and EXPECTED_CIPD_PACKAGE in resolved.read_text()
+                  selected = restored / 'bin/python3'
+                  restored_result = probe(selected, source, build_dir)
+                  save(diagnostic / 'restored-python.json', restored_result)
+                  assert restored_result['passed'], 'pinned CPython still fails; inspect ELF/ldd evidence before changing dependencies'
+                  selected_origin = 'verified DEPS-pinned public CIPD host interpreter'
+              (diagnostic / 'selected-python.path').write_text(str(selected) + '\n')
+              save(diagnostic / 'preflight-result.json', {
+                  'status': 'VERIFIED', 'selected_interpreter': str(selected), 'origin': selected_origin,
+                  'original_interpreter_passed': original_result['passed'],
+                  'system_python_substituted_for_build': False,
+                  'concurrent_links_source_modified': False,
+                  'gn_override': '--script-executable=' + str(selected),
+              })
+              print(json.dumps({'host_python_preflight': 'VERIFIED', 'selected_interpreter': str(selected),
+                                'original_interpreter_passed': original_result['passed']}))
+          
+          if __name__ == '__main__':
+              main()
+          CHROMIUM_MAINTENANCE_EOF
+          cat > probe/extract-python-subset.py <<'CHROMIUM_MAINTENANCE_EOF'
+          #!/usr/bin/env python3
+          """Extract only the reviewed interpreter diagnostic inputs from a verified tar."""
+          import hashlib
+          import json
+          from pathlib import Path, PurePosixPath
+          import sys
+          import tarfile
+          
+          archive, destination, report = map(Path, sys.argv[1:])
+          expected = '21b8adf397a045173b3fbc9ab87be0f4e97f1c0b0dc396584ea21b7db2c36624'
+          digest = hashlib.file_digest(archive.open('rb'), 'sha256').hexdigest()
+          assert digest == expected, 'source tar SHA256 mismatch'
+          prefix = 'chromium-158.0.8127.36'
+          required = {'DEPS', 'build/toolchain/get_concurrent_links.py', 'build/gn_helpers.py'}
+          selected = []
+          destination.mkdir(parents=True, exist_ok=False)
+          with tarfile.open(archive, 'r|xz') as source:
+              for member in source:
+                  name = member.name.removeprefix('./')
+                  path = PurePosixPath(name)
+                  assert not path.is_absolute() and '..' not in path.parts
+                  if not path.parts or path.parts[0] != prefix:
+                      continue
+                  relative = '/'.join(path.parts[1:])
+                  if relative in required or relative == 'third_party/cpython3/host' or relative.startswith('third_party/cpython3/host/'):
+                      source.extract(member, destination, filter='data')
+                      selected.append({'path': name, 'size': member.size, 'type': member.type.decode('ascii'), 'linkname': member.linkname})
+          root = destination / prefix
+          assert all((root / item).is_file() for item in required)
+          report.write_text(json.dumps({'source_tar_sha256':digest, 'source_tar_bytes':archive.stat().st_size,
+                                       'source_root':str(root), 'required_files':sorted(required),
+                                       'selected_members':selected,
+                                       'original_python_present':(root/'third_party/cpython3/host/bin/python3').exists()},indent=2)+'\n')
+          print(root)
+          CHROMIUM_MAINTENANCE_EOF
+          cat > probe/probe-source-python.sh <<'CHROMIUM_MAINTENANCE_EOF'
+          #!/bin/bash
+          set -euo pipefail
+          cd /tmp/chromium158-python-probe
+          mkdir -p diagnostic cache build
+          export DEPOT_TOOLS_UPDATE=0 DEPOT_TOOLS_METRICS=0
+          source_url=https://github.com/chromium-linux-tarballs/chromium-tarballs/releases/download/158.0.8127.36/chromium-158.0.8127.36-linux.tar.xz
+          curl --fail --location --silent --show-error --retry 2 --output source.tar.xz "$source_url"
+          source_root=$(/usr/bin/python3 extract-python-subset.py source.tar.xz source diagnostic/source-extraction.json)
+          git init cache/depot_tools
+          git -C cache/depot_tools remote add origin https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          git -C cache/depot_tools fetch --depth 1 origin ec77017fb3e090ff02bffb9c6980ebcdd3006ddc
+          git -C cache/depot_tools checkout --detach FETCH_HEAD
+          test "$(git -C cache/depot_tools rev-parse HEAD)" = ec77017fb3e090ff02bffb9c6980ebcdd3006ddc
+          git -C cache/depot_tools rev-parse HEAD > diagnostic/depot-tools-commit.txt
+          cache/depot_tools/ensure_bootstrap > diagnostic/depot-tools-bootstrap.log 2>&1
+          /usr/bin/python3 host-python-preflight.py "$source_root" "$PWD/cache" "$PWD/cache/depot_tools/cipd" "$PWD/diagnostic/python" "$PWD/build"
+          cat diagnostic/python/preflight-result.json
+          CHROMIUM_MAINTENANCE_EOF
+          sha256sum probe/* > diagnostic/maintenance-source.sha256
+      - name: Probe the original tar interpreter and only its matching CIPD pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Disk/RAM suitability was already verified in run 44857104233.
+          # No repeated host cleanup, compiler invocation, or device installation.
+          docker pull --platform linux/amd64 "$BUILDER_IMAGE"
+          docker run --detach --name chromium158-python-probe --platform linux/amd64 --entrypoint /bin/sleep "$BUILDER_IMAGE" infinity > diagnostic/container-id.txt
+          docker inspect chromium158-python-probe --format '{{json .Config.Image}}' > diagnostic/container-image.json
+          docker exec chromium158-python-probe mkdir -p /tmp/chromium158-python-probe
+          docker cp probe/. chromium158-python-probe:/tmp/chromium158-python-probe/
+          docker exec chromium158-python-probe /bin/bash /tmp/chromium158-python-probe/probe-source-python.sh > diagnostic/python-probe.log 2>&1
+      - name: Collect the diagnosis and remove only this probe container
+        if: always()
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p diagnostic
-          lsblk -b -J -o NAME,PATH,SIZE,TYPE,FSTYPE,MOUNTPOINTS,PKNAME,RO > diagnostic/lsblk-before.json
-          df -B1 -a > diagnostic/df-all-before.txt
-          findmnt --json -o TARGET,SOURCE,FSTYPE,OPTIONS > diagnostic/findmnt-before.json
-          test "$(uname -m)" = x86_64
-          {
-            date -u +%FT%TZ
-            uname -a
-            printf 'cpu_count='; nproc
-            awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/ { print }' /proc/meminfo
-            df -B1 --output=source,size,used,avail,target /
-            docker version --format '{{.Server.Version}}'
-          } > diagnostic/host-before.txt
-          git init termux-packages
-          git -C termux-packages remote add origin https://github.com/termux/termux-packages.git
-          git -C termux-packages fetch --depth 1 origin "$PACKAGING_COMMIT"
-          git -C termux-packages checkout --detach FETCH_HEAD
-          test "$(git -C termux-packages rev-parse HEAD)" = "$PACKAGING_COMMIT"
-          sha256sum termux-packages/scripts/free-space.sh > diagnostic/free-space-source.sha256
-          sed -n '/^TERMUX_PKG_VERSION=/p; /^TERMUX_PKG_SHA256=/p; /^TERMUX_PKG_ON_DEVICE_BUILD_NOT_SUPPORTED=/p' termux-packages/x11-packages/chromium/build.sh > diagnostic/chromium-recipe.txt
-          sed -n '/^TERMUX_PKG_VERSION=/p; /^TERMUX_PKG_SHA256=/p; /^TERMUX_PKG_ON_DEVICE_BUILD_NOT_SUPPORTED=/p' termux-packages/x11-packages/chromium-host-tools/build.sh > diagnostic/host-tools-recipe.txt
-      - name: Load the same official builder image before freeing ephemeral runner space
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker pull --platform linux/amd64 "$BUILDER_IMAGE"
-          docker image inspect "$BUILDER_IMAGE" --format '{{json .RepoDigests}}' > diagnostic/builder-digests.json
-          docker image inspect "$BUILDER_IMAGE" --format '{{.Architecture}} {{.Os}} {{.Size}}' > diagnostic/builder-platform.txt
-          # Match official CI: instantiate the pinned image before its compressed content is cleaned.
-          docker run --detach --name chromium158-maintenance-probe --platform linux/amd64 --entrypoint /bin/sleep "$BUILDER_IMAGE" infinity > diagnostic/container-id.txt
-          docker inspect chromium158-maintenance-probe --format '{{json .Config.Image}}' > diagnostic/container-image.json
-          # This pinned official script acts only on this disposable Actions VM.
-          # It is never sent to either Termux device.
-          (cd termux-packages && CI=true ./scripts/free-space.sh) > diagnostic/ephemeral-space-cleanup.log 2>&1
-      - name: Measure remaining space and the container toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            date -u +%FT%TZ
-            printf 'cpu_count='; nproc
-            awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/ { print }' /proc/meminfo
-            df -B1 --output=source,size,used,avail,target /
-          } > diagnostic/host-after.txt
-          test "$(docker inspect chromium158-maintenance-probe --format '{{.State.Running}}')" = true
-          docker exec chromium158-maintenance-probe /bin/bash -lc '
-            set -euo pipefail
-            uname -m
-            command -v python3
-            python3 --version
-            ldd --version
-            python3 -c "import json,os,sys,ctypes; print(json.dumps(dict(python=sys.version,executable=sys.executable,cpu=os.cpu_count(),libc_available=bool(ctypes.CDLL(None)))))"
-            if command -v gn >/dev/null; then gn --version; gn help --script-executable; fi
-          ' > diagnostic/container-toolchain.txt 2>&1
-          lsblk -b -J -o NAME,PATH,SIZE,TYPE,FSTYPE,MOUNTPOINTS,PKNAME,RO > diagnostic/lsblk-after.json
-          df -B1 -a > diagnostic/df-all-after.txt
-          findmnt --json -o TARGET,SOURCE,FSTYPE,OPTIONS > diagnostic/findmnt-after.json
-          # Host Python is deliberately removed by the official cleanup; use coreutils and jq.
-          for target in / /mnt "$GITHUB_WORKSPACE" "$RUNNER_TEMP"; do
-            if test -e "$target"; then
-              device=$(stat -L -c '%d' "$target")
-              read -r block_size total_blocks available_blocks < <(stat -L -f -c '%S %b %a' "$target")
-              jq -n --arg path "$target" --argjson device "$device" --argjson unit "$block_size" --argjson total "$total_blocks" --argjson available "$available_blocks" \
-                '{path:$path,exists:true,device_id:$device,total_bytes:($unit*$total),available_bytes:($unit*$available)}'
-            else
-              jq -n --arg path "$target" '{path:$path,exists:false}'
+          if docker container inspect chromium158-python-probe >/dev/null 2>&1; then
+            if docker exec chromium158-python-probe test -d /tmp/chromium158-python-probe/diagnostic; then
+              docker cp chromium158-python-probe:/tmp/chromium158-python-probe/diagnostic/. diagnostic/
             fi
-          done | jq -s '{filesystem_records:.,measurement:"GNU stat filesystem counters",volumes_created_or_reconfigured:false}' > diagnostic/work-volumes.json
-          disk_available=$(df -B1 --output=avail / | tail -n 1 | tr -d ' ')
-          memory_total=$(awk '/^MemTotal:/ { printf "%.0f", $2 * 1024 }' /proc/meminfo)
-          cpu_count=$(nproc)
-          # These are diagnostic thresholds, not a guarantee that a full build completes.
-          # The official minimum is 100 GB; 100 GiB is recorded separately as headroom.
-          jq -n --argjson disk "$disk_available" --argjson memory "$memory_total" --argjson cpu "$cpu_count" \
-            '{disk_available_bytes:$disk,memory_total_bytes:$memory,cpu_count:$cpu,minimum_disk_bytes:100000000000,recommended_disk_bytes:107374182400,meets_recommended_disk:($disk>=107374182400),minimum_memory_bytes:8000000000,environment_guard:($disk>=100000000000 and $memory>=8000000000 and $cpu>=2),full_build_attempted:false,artifact_installed:false}' > diagnostic/summary.json
-          cat diagnostic/summary.json
-          jq -e '.environment_guard' diagnostic/summary.json
-      - name: Remove only this job's probe container
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          if docker container inspect chromium158-maintenance-probe >/dev/null 2>&1; then
-            docker inspect chromium158-maintenance-probe --format '{{json .State}}' > diagnostic/container-state-before-removal.json
-            docker rm --force chromium158-maintenance-probe > diagnostic/container-removal.txt
-            if docker container inspect chromium158-maintenance-probe >/dev/null 2>&1; then
-              exit 1
-            fi
+            docker inspect chromium158-python-probe --format '{{json .State}}' > diagnostic/container-state-before-removal.json
+            docker rm --force chromium158-python-probe > diagnostic/container-removal.txt
+            if docker container inspect chromium158-python-probe >/dev/null 2>&1; then exit 1; fi
           fi
-      - name: Preserve the diagnostic receipt even if a measurement failed
+      - name: Preserve only diagnostic logs and hashes
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: chromium158-public-preflight-${{ github.run_id }}
+          name: chromium158-python-preflight-${{ github.run_id }}
           path: diagnostic/
           if-no-files-found: error
           retention-days: 7
