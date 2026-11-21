@@ -1,4 +1,4 @@
-name: Build verified Chromium 158 for Termux aarch64
+name: Build Chromium 158 browser using the verified host-tools artifact
 
 on:
   push:
@@ -15,660 +15,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  host-tools:
-    runs-on: ubuntu-26.04
-    timeout-minutes: 350
-    env:
-      PACKAGING_COMMIT: 07f9482c02535417719d7f6398f649d4bc176a1c
-      BASE_TERMUX_BUILDER_IMAGE: ghcr.io/termux/package-builder@sha256:e2de051a518d8b188c59c4a1ecf357d373b9ccf48d6c06d7681fdc3f61a77287
-      TERMUX_BUILDER_IMAGE_NAME: chromium158-maintenance-with-ccache:local
-      CONTAINER_NAME: chromium158-host-tools
-    steps:
-      - name: Pin the public upstream source and materialize the reviewed repair
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p diagnostic
-          git init termux-packages
-          git -C termux-packages remote add origin https://github.com/termux/termux-packages.git
-          git -C termux-packages fetch --depth 1 origin "$PACKAGING_COMMIT"
-          git -C termux-packages checkout --detach FETCH_HEAD
-          test "$(git -C termux-packages rev-parse HEAD)" = "$PACKAGING_COMMIT"
-          mkdir -p termux-packages/maintenance-inputs
-          cat > termux-packages/maintenance-inputs/apply-recovery.py <<'CHROMIUM_MAINTENANCE_EOF'
-          #!/usr/bin/env python3
-          """Apply the bounded two-recipe recovery to the exact reviewed Termux source."""
-          import argparse
-          import hashlib
-          import json
-          from pathlib import Path
-          import re
-          import subprocess
-          
-          PACKAGING_COMMIT = '07f9482c02535417719d7f6398f649d4bc176a1c'
-          VERSION = '158.0.8127.36'
-          REVISION = '0~termuxlocal1'
-          DEPOT_TOOLS_COMMIT = 'ec77017fb3e090ff02bffb9c6980ebcdd3006ddc'
-          TARBALL_SHA256 = '21b8adf397a045173b3fbc9ab87be0f4e97f1c0b0dc396584ea21b7db2c36624'
-          ORIGINAL = {
-              'x11-packages/chromium/build.sh': '8def8250ee1653f0337af2db9fe330efaffbd33e473c7f482a6fd319848a030f',
-              'x11-packages/chromium-host-tools/build.sh': 'd190cdd941a842b6236c7b7ef52af916e09636126d4e57ffda2bb2c6c53c221e',
-          }
-          GN_LINE = '\tgn gen $TERMUX_PKG_BUILDDIR/out/Release\n'
-          GN_REPLACEMENT = '''\t# Diagnose the exact Chromium DEPS Python before GN, without a broad system-Python substitution.
-          \tlocal _maintenance_diag="$TERMUX_SCRIPTDIR/output/maintenance-diagnostics/$TERMUX_PKG_NAME"
-          \ttest "$TERMUX_PKG_MAKE_PROCESSES" -eq 4
-          \t/usr/bin/python3 "$TERMUX_SCRIPTDIR/maintenance/chromium158/host-python-preflight.py" \\
-          \t\t"$TERMUX_PKG_SRCDIR" "$TERMUX_PKG_CACHEDIR" "$TERMUX_PKG_CACHEDIR/depot_tools/cipd" \\
-          \t\t"$_maintenance_diag" "$TERMUX_PKG_BUILDDIR/out/Release"
-          \tlocal _maintenance_python
-          \t_maintenance_python="$(cat "$_maintenance_diag/selected-python.path")"
-          \tprintf 'ninja_parallel_jobs=%s\\n' "$TERMUX_PKG_MAKE_PROCESSES" | tee "$_maintenance_diag/ninja-parallelism.txt"
-          \t# Chromium's supported compiler wrapper covers the host and target C/C++ toolchains.
-          \tprintf '\\ncc_wrapper = "/usr/bin/ccache"\\n' >> "$TERMUX_PKG_BUILDDIR/out/Release/args.gn"
-          \tgn gen "$TERMUX_PKG_BUILDDIR/out/Release" --script-executable="$_maintenance_python"
-          \tcp "$TERMUX_PKG_BUILDDIR/out/Release/args.gn" "$_maintenance_diag/args.gn"
-          \tgrep -R -F --include=toolchain.ninja '/usr/bin/ccache' "$TERMUX_PKG_BUILDDIR/out/Release" > "$_maintenance_diag/ccache-generated-commands.txt"
-          \ttest -s "$_maintenance_diag/ccache-generated-commands.txt"
-          '''
-          VERSION_GUARD = '''\tif [ "${version_tools}" != "${TERMUX_PKG_VERSION}" ]; then
-          \t\ttermux_error_exit "Version mismatch between chromium-host-tools and chromium."
-          \tfi
-          '''
-          HOSTTOOLS_GUARD = '''\t# Verify what dependency resolution actually installed before consuming any host-tool output.
-          \tmkdir -p "$TERMUX_SCRIPTDIR/output/maintenance-diagnostics/chromium"
-          \t/usr/bin/python3 "$TERMUX_SCRIPTDIR/maintenance/chromium158/package-manifest.py" verify-host-tools \\
-          \t\t"$TERMUX_SCRIPTDIR/output/host-tools-input/manifest.json" "$TERMUX_PREFIX" \\
-          \t\t"$TERMUX_BUILT_PACKAGES_DIRECTORY/chromium-host-tools" \\
-          \t\t> "$TERMUX_SCRIPTDIR/output/maintenance-diagnostics/chromium/installed-host-tools.json"
-          '''
-          DEPOT_CLONE = '\t\tgit clone https://chromium.googlesource.com/chromium/tools/depot_tools.git $TERMUX_PKG_CACHEDIR/depot_tools\n'
-          DEPOT_PINNED = '''\t\tgit init "$TERMUX_PKG_CACHEDIR/depot_tools"
-          \t\tgit -C "$TERMUX_PKG_CACHEDIR/depot_tools" remote add origin https://chromium.googlesource.com/chromium/tools/depot_tools.git
-          \t\tgit -C "$TERMUX_PKG_CACHEDIR/depot_tools" fetch --depth 1 origin ec77017fb3e090ff02bffb9c6980ebcdd3006ddc
-          \t\tgit -C "$TERMUX_PKG_CACHEDIR/depot_tools" checkout --detach FETCH_HEAD
-          \t\ttest "$(git -C "$TERMUX_PKG_CACHEDIR/depot_tools" rev-parse HEAD)" = ec77017fb3e090ff02bffb9c6980ebcdd3006ddc
-          '''
-          
-          def main():
-              parser = argparse.ArgumentParser()
-              parser.add_argument('source_root', type=Path)
-              parser.add_argument('--helper', type=Path, default=Path(__file__).with_name('host-python-preflight.py'))
-              parser.add_argument('--package-helper', type=Path, default=Path(__file__).with_name('package-manifest.py'))
-              args = parser.parse_args()
-              root = args.source_root.resolve()
-              head = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
-              assert head == PACKAGING_COMMIT, {'unexpected_source_commit': head}
-              planned = {}
-              for name, expected in ORIGINAL.items():
-                  path = root / name
-                  original = path.read_bytes()
-                  assert hashlib.sha256(original).hexdigest() == expected, {'unexpected_source_file': name}
-                  text = original.decode()
-                  assert text.count(GN_LINE) == 1
-                  assert text.count(DEPOT_CLONE) == 1
-                  text = text.replace(DEPOT_CLONE, DEPOT_PINNED, 1)
-                  if name == 'x11-packages/chromium/build.sh':
-                      assert text.count('TERMUX_PKG_VERSION="157.0.8103.78"') == 1
-                      text = text.replace('TERMUX_PKG_VERSION="157.0.8103.78"', 'TERMUX_PKG_VERSION="' + VERSION + '"', 1)
-                      text = text.replace('TERMUX_PKG_SHA256=435562dbe041c96e7df02791798b2aa0489ed793627e2a9791045c5e5b9f9408', 'TERMUX_PKG_SHA256=' + TARBALL_SHA256, 1)
-                      assert 'Version mismatch between chromium-host-tools and chromium.' in text
-                      assert text.count(VERSION_GUARD) == 1
-                      text = text.replace(VERSION_GUARD, VERSION_GUARD + HOSTTOOLS_GUARD, 1)
-                  else:
-                      assert 'TERMUX_PKG_VERSION="' + VERSION + '"' in text and 'TERMUX_PKG_SHA256=' + TARBALL_SHA256 in text
-                  version_line = 'TERMUX_PKG_VERSION="' + VERSION + '"\n'
-                  assert text.count(version_line) == 1 and 'TERMUX_PKG_REVISION=' not in text
-                  text = text.replace(version_line, version_line + 'TERMUX_PKG_REVISION="' + REVISION + '"\n', 1)
-                  text = text.replace(GN_LINE, GN_REPLACEMENT, 1)
-                  text, ninja_sites = re.subn(r'(?m)^(\t(?:time )?)ninja -C out/Release',
-                                             r'\1ninja -j "$TERMUX_PKG_MAKE_PROCESSES" -C out/Release', text)
-                  assert ninja_sites == (5 if name == 'x11-packages/chromium/build.sh' else 4)
-                  syntax = subprocess.run(['bash', '-n'], input=text, text=True, capture_output=True)
-                  assert syntax.returncode == 0, syntax.stderr
-                  planned[name] = text.encode()
-              helper = args.helper.read_bytes()
-              compile(helper, str(args.helper), 'exec')
-              package_helper = args.package_helper.read_bytes()
-              compile(package_helper, str(args.package_helper), 'exec')
-              destination = root / 'maintenance/chromium158/host-python-preflight.py'
-              package_destination = destination.with_name('package-manifest.py')
-              assert not destination.exists() and not package_destination.exists()
-              for name, content in planned.items():
-                  (root / name).write_bytes(content)
-              destination.parent.mkdir(parents=True, exist_ok=True)
-              destination.write_bytes(helper)
-              package_destination.write_bytes(package_helper)
-              print(json.dumps({'status': 'PATCHED_NOT_BUILT', 'source_commit': head,
-                                'version': VERSION, 'revision': REVISION, 'debian_version': VERSION + '-' + REVISION,
-                                'source_tar_sha256': TARBALL_SHA256,
-                                'depot_tools_commit': DEPOT_TOOLS_COMMIT,
-                                'changed_files': [{'path': name, 'sha256': hashlib.sha256(content).hexdigest()}
-                                                  for name, content in planned.items()],
-                                'new_helper': {'path': str(destination.relative_to(root)), 'sha256': hashlib.sha256(helper).hexdigest()},
-                                'package_helper': {'path': str(package_destination.relative_to(root)), 'sha256': hashlib.sha256(package_helper).hexdigest()},
-                                'installed_host_tools_payload_guard': True,
-                                'ninja_parallelism_bound_to_build_package_j': 4,
-                                'compiler_cache_wrapper': '/usr/bin/ccache',
-                                'version_guard_preserved': True, 'both_gn_sites_guarded': True,
-                                'concurrent_links_logic_changed': False}))
-          
-          if __name__ == '__main__':
-              main()
-          CHROMIUM_MAINTENANCE_EOF
-          cat > termux-packages/maintenance-inputs/host-python-preflight.py <<'CHROMIUM_MAINTENANCE_EOF'
-          #!/usr/bin/env python3
-          """Diagnose Chromium's exact host Python, then restore its DEPS pin if needed.
-          
-          Run only inside the fixed official x86_64 Termux builder container. This helper
-          never substitutes the container system Python for Chromium's build interpreter.
-          The system Python runs only this diagnostic/bootstrap helper.
-          """
-          import hashlib
-          import json
-          import os
-          from pathlib import Path
-          import platform
-          import re
-          import subprocess
-          import sys
-          
-          EXPECTED_CIPD_PACKAGE = 'infra/3pp/tools/cpython3/linux-amd64'
-          EXPECTED_CIPD_VERSION = 'version:3@3.11.9.chromium.38'
-          EXPECTED_CIPD_INSTANCE = 't7igptFxuJGP2lGu4db_6wyKFMeR-x0LxddFTIydlJsC'
-          EXPECTED_CIPD_PYTHON_SHA256 = 'df4f8d0ae4bace71af48c8630b2cb48789395925c08b56fa8037be9b15f215a7'
-          EXPECTED_PYTHON_VERSION = [3, 11, 9]
-          
-          def run(argv, cwd, *, stdin=None, timeout=60):
-              try:
-                  result = subprocess.run([str(x) for x in argv], cwd=cwd, input=stdin,
-                                          capture_output=True, text=True, timeout=timeout)
-                  return {'argv': [str(x) for x in argv], 'returncode': result.returncode,
-                          'stdout': result.stdout, 'stderr': result.stderr}
-              except (OSError, subprocess.TimeoutExpired) as error:
-                  return {'argv': [str(x) for x in argv], 'returncode': None,
-                          'error_type': type(error).__name__, 'errno': getattr(error, 'errno', None),
-                          'error': str(error)}
-          
-          def save(path, value):
-              path.write_text(json.dumps(value, indent=2) + '\n')
-          
-          def probe(candidate, source, build_dir):
-              result = {'path': str(candidate), 'exists': candidate.exists(),
-                        'symlink': candidate.is_symlink(), 'resolved_path': str(candidate.resolve()),
-                        'cwd': str(build_dir), 'platform': platform.machine(),
-                        'environment_paths': {key: os.environ.get(key) for key in
-                                              ['LD_LIBRARY_PATH', 'LD_PRELOAD', 'PYTHONHOME', 'PYTHONPATH']}}
-              result['file'] = run(['file', '-L', str(candidate)], build_dir)
-              result['elf_headers'] = run(['readelf', '--wide', '--file-header', '--program-headers', str(candidate)], build_dir)
-              headers = result['elf_headers'].get('stdout', '')
-              interpreter = re.search(r'Requesting program interpreter: ([^\]]+)\]', headers)
-              if interpreter:
-                  loader = Path(interpreter.group(1))
-                  result['elf_interpreter'] = {'path': str(loader), 'exists': loader.exists(),
-                                               'resolved_path': str(loader.resolve())}
-              result['ldd'] = run(['ldd', str(candidate)], build_dir)
-              result['version'] = run([candidate, '--version'], build_dir)
-              result['runtime_identity'] = run([candidate, '-c',
-                  'import json,platform,sys; print(json.dumps({"version":list(sys.version_info[:3]),"machine":platform.machine(),"executable":sys.executable}))'], build_dir)
-              result['concurrent_links'] = run([candidate, source / 'build/toolchain/get_concurrent_links.py', '--mem_per_link_gb=3'], build_dir)
-              try:
-                  identity = json.loads(result['runtime_identity'].get('stdout', ''))
-              except (ValueError, TypeError):
-                  identity = {}
-              result['passed'] = (result['elf_headers'].get('returncode') == 0
-                                  and 'Advanced Micro Devices X86-64' in headers
-                                  and identity.get('version') == EXPECTED_PYTHON_VERSION
-                                  and identity.get('machine') == 'x86_64'
-                                  and result['version'].get('returncode') == 0
-                                  and result['concurrent_links'].get('returncode') == 0)
-              if candidate.is_file():
-                  result['executable_sha256'] = hashlib.sha256(candidate.read_bytes()).hexdigest()
-              return result
-          
-          def main():
-              assert len(sys.argv) == 6, 'source cache cipd-executable diagnostic-directory build-directory required'
-              source, cache, cipd, diagnostic, build_dir = [Path(value).resolve() for value in sys.argv[1:]]
-              assert platform.system() == 'Linux' and platform.machine() == 'x86_64'
-              assert source.is_dir() and cache.is_dir() and build_dir.is_dir()
-              diagnostic.mkdir(parents=True, exist_ok=True)
-              deps = (source / 'DEPS').read_text()
-              version = re.search(r'''['"]cpython3_version['"]\s*:\s*['"]([^'"]+)['"]''', deps)
-              assert version and version.group(1) == EXPECTED_CIPD_VERSION, 'unexpected CPython DEPS pin'
-              script = source / 'build/toolchain/get_concurrent_links.py'
-              save(diagnostic / 'source-identity.json', {
-                  'deps_sha256': hashlib.sha256((source / 'DEPS').read_bytes()).hexdigest(),
-                  'concurrent_links_sha256': hashlib.sha256(script.read_bytes()).hexdigest(),
-                  'cipd_package': EXPECTED_CIPD_PACKAGE, 'cipd_version': EXPECTED_CIPD_VERSION,
-                  'cipd_instance_verified_in_run_44858080166': EXPECTED_CIPD_INSTANCE,
-                  'container_system_python_used_only_for_diagnostic_helper': sys.executable,
-              })
-              original = source / 'third_party/cpython3/host/bin/python3'
-              original_result = probe(original, source, build_dir)
-              save(diagnostic / 'original-python.json', original_result)
-              selected = original
-              selected_origin = 'verified official source-tarball host interpreter'
-              if not original_result['passed']:
-                  # Keep the original tree intact so missing files, ELF loader or library
-                  # errors remain inspectable. Install only the exact public DEPS package
-                  # into a separate build cache and record its fully resolved instance pin.
-                  assert cipd.is_file() and os.access(cipd, os.X_OK), 'depot_tools CIPD client unavailable'
-                  restored = cache / 'maintenance-cpython'
-                  resolved = diagnostic / 'cpython-resolved.ensure'
-                  manifest = EXPECTED_CIPD_PACKAGE + ' ' + EXPECTED_CIPD_INSTANCE + '\n'
-                  ensured = run([cipd, 'ensure', '-root', restored, '-ensure-file', '-',
-                                 '-ensure-file-output', resolved], build_dir, stdin=manifest, timeout=300)
-                  save(diagnostic / 'cipd-ensure.json', ensured)
-                  assert ensured.get('returncode') == 0, 'pinned CIPD bootstrap failed; GN not started'
-                  assert resolved.is_file() and EXPECTED_CIPD_PACKAGE in resolved.read_text() and EXPECTED_CIPD_INSTANCE in resolved.read_text()
-                  selected = restored / 'bin/python3'
-                  restored_result = probe(selected, source, build_dir)
-                  save(diagnostic / 'restored-python.json', restored_result)
-                  assert restored_result['passed'], 'pinned CPython still fails; inspect ELF/ldd evidence before changing dependencies'
-                  assert restored_result['executable_sha256'] == EXPECTED_CIPD_PYTHON_SHA256, 'verified CIPD interpreter bytes changed'
-                  selected_origin = 'verified DEPS-pinned public CIPD host interpreter'
-              (diagnostic / 'selected-python.path').write_text(str(selected) + '\n')
-              save(diagnostic / 'preflight-result.json', {
-                  'status': 'VERIFIED', 'selected_interpreter': str(selected), 'origin': selected_origin,
-                  'original_interpreter_passed': original_result['passed'],
-                  'system_python_substituted_for_build': False,
-                  'concurrent_links_source_modified': False,
-                  'gn_override': '--script-executable=' + str(selected),
-              })
-              print(json.dumps({'host_python_preflight': 'VERIFIED', 'selected_interpreter': str(selected),
-                                'original_interpreter_passed': original_result['passed']}))
-          
-          if __name__ == '__main__':
-              main()
-          CHROMIUM_MAINTENANCE_EOF
-          cat > termux-packages/maintenance-inputs/package-manifest.py <<'CHROMIUM_MAINTENANCE_EOF'
-          #!/usr/bin/env python3
-          """Bind a local DEB to its exact payload and verify installed build host-tools."""
-          import hashlib
-          import json
-          import os
-          from pathlib import Path, PurePosixPath
-          import stat
-          import struct
-          import subprocess
-          import sys
-          import tarfile
-          
-          VERSION = '158.0.8127.36-0~termuxlocal1'
-          PREFIX = 'data/data/com.termux/files/usr'
-          HOST_TOOLS = PREFIX + '/opt/chromium-host-tools'
-          
-          def sha(path):
-              with Path(path).open('rb') as source:
-                  return hashlib.file_digest(source, 'sha256').hexdigest()
-          
-          def normalized(name):
-              name = name.removeprefix('./')
-              path = PurePosixPath(name)
-              assert not path.is_absolute() and '..' not in path.parts, name
-              return str(path)
-          
-          def metadata(deb):
-              return {key.lower():subprocess.check_output(['dpkg-deb','--field',str(deb),key],text=True).strip()
-                      for key in ['Package','Version','Architecture']}
-          
-          def payload(deb):
-              entries = {}
-              process = subprocess.Popen(['dpkg-deb','--fsys-tarfile',str(deb)],stdout=subprocess.PIPE)
-              try:
-                  with tarfile.open(fileobj=process.stdout,mode='r|') as archive:
-                      for member in archive:
-                          name = normalized(member.name)
-                          if name == '.':
-                              continue
-                          assert name not in entries, {'duplicate_payload_member':name}
-                          entry = {'path':name,'mode':member.mode & 0o7777}
-                          if member.isdir():
-                              entry['kind'] = 'directory'
-                          elif member.isfile():
-                              stream = archive.extractfile(member)
-                              digest = hashlib.sha256()
-                              first = stream.read(min(member.size,64))
-                              digest.update(first)
-                              while block := stream.read(1024*1024):
-                                  digest.update(block)
-                              entry.update(kind='file',size=member.size,sha256=digest.hexdigest())
-                              if first.startswith(b'\x7fELF'):
-                                  assert len(first)>=20 and first[5] in [1,2]
-                                  entry['elf']={'class':first[4],'data':first[5],
-                                                'machine':struct.unpack('<H' if first[5]==1 else '>H',first[18:20])[0]}
-                          elif member.issym():
-                              entry.update(kind='symlink',target=member.linkname)
-                          elif member.islnk():
-                              entry.update(kind='hardlink',target=normalized(member.linkname))
-                          else:
-                              raise AssertionError({'unexpected_payload_type':name,'type':member.type.decode('ascii')})
-                          entries[name]=entry
-                  assert process.wait()==0, 'dpkg-deb payload read failed'
-              finally:
-                  if process.poll() is None:
-                      process.kill()
-                      process.wait()
-                  process.stdout.close()
-              for name,entry in entries.items():
-                  if entry['kind']=='hardlink':
-                      target=entries[entry['target']]
-                      seen={name}
-                      while target['kind']=='hardlink':
-                          assert target['path'] not in seen, 'cyclic hardlink'
-                          seen.add(target['path'])
-                          target=entries[target['target']]
-                      assert target['kind']=='file'
-                      entry.update(size=target['size'],sha256=target['sha256'])
-              return [entries[name] for name in sorted(entries)]
-          
-          def create(deb,manifest,package):
-              info=metadata(deb)
-              assert info=={'package':package,'version':VERSION,'architecture':'aarch64'}, info
-              entries=payload(deb)
-              by_path={e['path']:e for e in entries}
-              if package=='chromium-host-tools':
-                  required=['snapshot_blob.bin','v8_context_snapshot.bin','libvk_swiftshader.so',
-                            'vk_swiftshader_icd.json','obj/third_party/pdfium/libpdfium.a']
-                  assert all(HOST_TOOLS+'/'+name in by_path for name in required)
-                  assert any(e['path'].startswith(HOST_TOOLS+'/') and e['path'].endswith('/mksnapshot') for e in entries)
-              elif package=='chromium':
-                  required=['chrome','chromedriver','chrome_crashpad_handler','headless_shell']
-                  assert all(by_path[PREFIX+'/lib/chromium/'+name].get('elf',{}).get('machine')==183 for name in required)
-                  assert all(e.get('elf',{}).get('machine',183)==183 for e in entries)
-              else:
-                  raise AssertionError(package)
-              value={'schema':'chromium158-deb-payload/v1','package':info,'filename':deb.name,
-                     'deb_bytes':deb.stat().st_size,'deb_sha256':sha(deb),
-                     'source_commit':'07f9482c02535417719d7f6398f649d4bc176a1c',
-                     'source_version':'158.0.8127.36','revision':'0~termuxlocal1','payload':entries}
-              manifest.write_text(json.dumps(value,indent=2)+'\n')
-              print(json.dumps({'status':'PACKAGE_PAYLOAD_VERIFIED','package':info,'sha256':value['deb_sha256'],
-                                'payload_entries':len(entries),'manifest_sha256':sha(manifest)}))
-          
-          def verify_host_tools(manifest,prefix,marker):
-              value=json.loads(manifest.read_text())
-              assert value['package']=={'package':'chromium-host-tools','version':VERSION,'architecture':'aarch64'}
-              assert Path(value['filename']).name==value['filename']
-              deb=manifest.parent/value['filename']
-              assert sha(deb)==value['deb_sha256'] and metadata(deb)==value['package']
-              assert marker.read_text().strip()==VERSION, {'installed_marker':marker.read_text()}
-              assert str(prefix.resolve())=='/'+PREFIX
-              expected={e['path'][len(HOST_TOOLS)+1:]:e for e in value['payload']
-                        if e['path'].startswith(HOST_TOOLS+'/') and e['kind']!='directory'}
-              root=prefix/'opt/chromium-host-tools'
-              assert root.is_dir() and not root.is_symlink() and expected
-              actual={}
-              for parent,directories,files in os.walk(root,followlinks=False):
-                  for name in directories+files:
-                      path=Path(parent)/name
-                      mode=path.lstat().st_mode
-                      if stat.S_ISDIR(mode):
-                          continue
-                      actual[path.relative_to(root).as_posix()]=(path,mode)
-              assert set(actual)==set(expected), {'missing':sorted(set(expected)-set(actual)),
-                                                 'extra':sorted(set(actual)-set(expected))}
-              for name,entry in expected.items():
-                  path,mode=actual[name]
-                  if entry['kind']=='symlink':
-                      assert stat.S_ISLNK(mode) and os.readlink(path)==entry['target'], name
-                  else:
-                      assert stat.S_ISREG(mode) and not path.is_symlink(), name
-                      assert stat.S_IMODE(mode)==entry['mode'] and path.stat().st_size==entry['size'], name
-                      assert sha(path)==entry['sha256'], name
-              print(json.dumps({'status':'INSTALLED_HOST_TOOLS_MATCH_ARTIFACT','package':value['package'],
-                                'deb_sha256':value['deb_sha256'],'manifest_sha256':sha(manifest),
-                                'verified_files_and_links':len(expected),'unexpected_entries':0,
-                                'marker':marker.read_text().strip(),'prefix':str(prefix)}))
-          
-          if __name__=='__main__':
-              if len(sys.argv)==5 and sys.argv[1]=='create':
-                  create(Path(sys.argv[2]),Path(sys.argv[3]),sys.argv[4])
-              elif len(sys.argv)==5 and sys.argv[1]=='verify-host-tools':
-                  verify_host_tools(Path(sys.argv[2]),Path(sys.argv[3]),Path(sys.argv[4]))
-              else:
-                  raise SystemExit('create DEB MANIFEST PACKAGE | verify-host-tools MANIFEST PREFIX MARKER')
-          CHROMIUM_MAINTENANCE_EOF
-          cat > termux-packages/maintenance-inputs/build-stage.sh <<'CHROMIUM_MAINTENANCE_EOF'
-          #!/bin/bash
-          # Run only inside the isolated, fixed Termux package-builder container.
-          set -euo pipefail
-          cd /home/builder/termux-packages
-          stage=$1
-          case "$stage" in
-            host-tools) package=chromium-host-tools ;;
-            browser) package=chromium ;;
-            *) exit 2 ;;
-          esac
-          mkdir -p output/maintenance-diagnostics output/delivery
-          export CCACHE_DIR="$PWD/output/maintenance-ccache"
-          export CCACHE_MAXSIZE=1900MB
-          export CCACHE_COMPILERCHECK=content
-          export CCACHE_BASEDIR=/home/builder
-          mkdir -p "$CCACHE_DIR"
-          test "$(command -v ccache)" = /usr/bin/ccache
-          ccache --version > output/maintenance-diagnostics/ccache-version.txt
-          ccache --show-config > output/maintenance-diagnostics/ccache-config.txt
-          ccache --show-stats --verbose > output/maintenance-diagnostics/ccache-before.txt
-          # Each stage uses one immutable 2GB Actions cache. On a hit, avoid evicting
-          # its useful entries while recompiling a source tree larger than the cache.
-          if test "${NATIVE_CCACHE_RESTORED:-}" = true; then export CCACHE_READONLY=1; fi
-          printf '%s\n' "${NATIVE_CCACHE_RESTORED:-false}" > output/maintenance-diagnostics/ccache-restored.txt
-          test "$(git rev-parse HEAD)" = 07f9482c02535417719d7f6398f649d4bc176a1c
-          # The official restricted profile makes trusted repository scripts immutable.
-          # The host applied the reviewed patch before starting this confined container.
-          sha256sum --check maintenance-inputs/prepared.sha256 > output/maintenance-diagnostics/prepared-source-check.txt
-          git diff --check
-          git diff -- x11-packages/chromium/build.sh x11-packages/chromium-host-tools/build.sh > output/maintenance-diagnostics/recipes.patch
-          dpkg --validate-version '158.0.8127.36-0~termuxlocal1'
-          dpkg --compare-versions '157.0.8103.78' lt '158.0.8127.36-0~termuxlocal1'
-          dpkg --compare-versions '158.0.8127.36-0~termuxlocal1' lt '158.0.8127.36'
-          dpkg --compare-versions '158.0.8127.36-0~termuxlocal1' lt '158.0.8127.36-1'
-          TERMUX_ARCH=aarch64 bash scripts/build/termux_extract_dep_info.sh "$package" "$PWD/x11-packages/$package" > output/maintenance-diagnostics/requested-package.txt
-          test "$(cat output/maintenance-diagnostics/requested-package.txt)" = 'aarch64 158.0.8127.36-0~termuxlocal1 158.0.8127.36-0~termuxlocal1 true'
-          if test "$stage" = browser; then
-            /usr/bin/python3 - <<'PY'
-          import hashlib,json,subprocess
-          from pathlib import Path
-          root=Path('output/host-tools-input')
-          m=json.loads((root/'manifest.json').read_text())
-          expected='chromium-host-tools_158.0.8127.36-0~termuxlocal1_aarch64.deb'
-          assert m['filename']==expected and m['package']=={'package':'chromium-host-tools','version':'158.0.8127.36-0~termuxlocal1','architecture':'aarch64'}
-          with (root/expected).open('rb') as f: assert hashlib.file_digest(f,'sha256').hexdigest()==m['deb_sha256']
-          assert {p.name for p in root.iterdir()}=={expected,'manifest.json'}
-          subprocess.run(['cp','--no-clobber',str(root/expected),'output/'+expected],check=True)
-          Path('output/maintenance-diagnostics/host-tools-input.json').write_text(json.dumps({'deb_sha256':m['deb_sha256'],'manifest_sha256':hashlib.sha256((root/'manifest.json').read_bytes()).hexdigest(),'package':m['package']},indent=2)+'\n')
-          PY
-          fi
-          export NINJA_STATUS='[%f/%t %e sec] '
-          # A controlled limit leaves time for diagnostic and package upload before the six-hour job ceiling.
-          set +e
-          timeout --signal=TERM --kill-after=45s 19500 ./build-package.sh -I -j4 --format debian --reuse-built-packages -a aarch64 "$package" 2>&1 | tee output/maintenance-diagnostics/build.log
-          rc=${PIPESTATUS[0]}
-          set -e
-          printf '%s\n' "$rc" > output/maintenance-diagnostics/build.exit-code
-          if test "$rc" -ne 0; then exit "$rc"; fi
-          deb="output/${package}_158.0.8127.36-0~termuxlocal1_aarch64.deb"
-          test -f "$deb"
-          cp "$deb" output/delivery/
-          /usr/bin/python3 maintenance/chromium158/package-manifest.py create "output/delivery/$(basename "$deb")" output/delivery/manifest.json "$package" > output/maintenance-diagnostics/package-verification.json
-          if test "$stage" = browser; then
-            /usr/bin/python3 maintenance/chromium158/package-manifest.py verify-host-tools output/host-tools-input/manifest.json /data/data/com.termux/files/usr /data/data/.built-packages/chromium-host-tools > output/maintenance-diagnostics/chromium/installed-host-tools-after-build.json
-          fi
-          sha256sum output/delivery/* > output/maintenance-diagnostics/delivery.sha256
-          cat output/maintenance-diagnostics/package-verification.json
-          CHROMIUM_MAINTENANCE_EOF
-          sha256sum termux-packages/maintenance-inputs/* > diagnostic/maintenance-inputs.sha256
-          mkdir -p termux-packages/output/maintenance-diagnostics
-          python3 termux-packages/maintenance-inputs/apply-recovery.py termux-packages > termux-packages/output/maintenance-diagnostics/source-patch.json
-          git -C termux-packages diff --check
-          (
-            cd termux-packages
-            sha256sum x11-packages/chromium/build.sh x11-packages/chromium-host-tools/build.sh \
-              maintenance/chromium158/*.py maintenance-inputs/*.py maintenance-inputs/build-stage.sh > maintenance-inputs/prepared.sha256
-          )
-          cp termux-packages/maintenance-inputs/prepared.sha256 diagnostic/prepared.sha256
-      - name: Add ccache to the pinned parent image before starting the confined builder
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(uname -m)" = x86_64
-          mkdir -p diagnostic/ccache-image-context
-          cat > diagnostic/ccache-image-context/Dockerfile <<'CCACHE_IMAGE_EOF'
-          ARG BASE_IMAGE
-          FROM ${BASE_IMAGE}
-          USER root
-          RUN set -eux; \
-              mkdir -p /usr/local/share/chromium158-maintenance-image; \
-              dpkg-query -W -f='${Package} ${Version}\n' > /usr/local/share/chromium158-maintenance-image/packages-before.txt; \
-              apt-get update; \
-              DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends --no-remove -y ccache; \
-              dpkg-query -W -f='${Package} ${Version}\n' > /usr/local/share/chromium158-maintenance-image/packages-after.txt; \
-              ccache --version > /usr/local/share/chromium158-maintenance-image/ccache-version.txt; \
-              apt-get clean; \
-              rm -rf /var/lib/apt/lists/*
-          USER builder:builder
-          CCACHE_IMAGE_EOF
-          docker pull --platform linux/amd64 "$BASE_TERMUX_BUILDER_IMAGE"
-          docker image inspect "$BASE_TERMUX_BUILDER_IMAGE" > diagnostic/parent-image.json
-          docker build --pull=false --platform linux/amd64 \
-            --build-arg BASE_IMAGE="$BASE_TERMUX_BUILDER_IMAGE" \
-            --label org.opencontainers.image.base.name="$BASE_TERMUX_BUILDER_IMAGE" \
-            --iidfile diagnostic/derived-image.id --tag "$TERMUX_BUILDER_IMAGE_NAME" \
-            diagnostic/ccache-image-context 2>&1 | tee diagnostic/ccache-image-build.log
-          docker image inspect "$TERMUX_BUILDER_IMAGE_NAME" > diagnostic/derived-image.json
-          test "$(docker image inspect --format '{{.Id}}' "$TERMUX_BUILDER_IMAGE_NAME")" = "$(cat diagnostic/derived-image.id)"
-      - name: Start the confined builder before applying the official ephemeral cleanup
-        shell: bash
-        working-directory: termux-packages
-        run: |
-          set -euo pipefail
-          test "$(uname -m)" = x86_64
-          CI=true ./scripts/run-docker.sh /bin/bash -lc 'set -euo pipefail; uname -m; /usr/bin/python3 --version; dpkg --version' > ../diagnostic/container-toolchain.txt 2>&1
-          docker inspect "$CONTAINER_NAME" --format '{{json .Config.Image}}' > ../diagnostic/container-image.json
-          test "$(docker inspect "$CONTAINER_NAME" --format '{{.Image}}')" = "$(cat ../diagnostic/derived-image.id)"
-          docker exec "$CONTAINER_NAME" /bin/bash -lc '
-            set -euo pipefail
-            test "$(id -un)" = builder
-            test "$(id -u)" -ne 0
-            cat /proc/self/attr/current
-            test "$(command -v ccache)" = /usr/bin/ccache
-            ccache --version
-            sha256sum --check maintenance-inputs/prepared.sha256
-            touch output/maintenance-diagnostics/.confined-write-probe
-            rm output/maintenance-diagnostics/.confined-write-probe
-          ' > ../diagnostic/confined-builder-probe.txt 2>&1
-          grep -F "_custom-termux-package-builder-$CONTAINER_NAME (enforce)" ../diagnostic/confined-builder-probe.txt
-          docker cp "$CONTAINER_NAME:/usr/local/share/chromium158-maintenance-image" ../diagnostic/derived-package-records
-          LC_ALL=C sort ../diagnostic/derived-package-records/packages-before.txt > ../diagnostic/packages-before-sorted.txt
-          LC_ALL=C sort ../diagnostic/derived-package-records/packages-after.txt > ../diagnostic/packages-after-sorted.txt
-          comm -13 ../diagnostic/packages-before-sorted.txt ../diagnostic/packages-after-sorted.txt > ../diagnostic/added-or-updated-packages.txt
-          comm -23 ../diagnostic/packages-before-sorted.txt ../diagnostic/packages-after-sorted.txt > ../diagnostic/removed-or-replaced-packages.txt
-          test ! -s ../diagnostic/removed-or-replaced-packages.txt
-          grep -E '^ccache [^ ]+$' ../diagnostic/added-or-updated-packages.txt
-          CI=true ./scripts/free-space.sh > ../diagnostic/ephemeral-space-cleanup.log 2>&1
-          test "$(docker inspect "$CONTAINER_NAME" --format '{{.State.Running}}')" = true
-      - name: Restore this stage's bounded compiler cache
-        id: native-cache
-        continue-on-error: true
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: termux-packages/output/maintenance-ccache
-          key: native-chromium158-07f9482c-e2de051a-host-tools-ccache-v1
-
-      - name: Reserve job-local swap and verify this fresh runner's remaining capacity
-        shell: bash
-        run: |
-          set -euo pipefail
-          swapfile="$RUNNER_TEMP/chromium158-maintenance.swap"
-          test ! -e "$swapfile"
-          sudo fallocate -l 16G "$swapfile"
-          sudo chmod 600 "$swapfile"
-          sudo mkswap "$swapfile" > diagnostic/swap-setup.txt
-          sudo swapon "$swapfile"
-          swapon --show --bytes >> diagnostic/swap-setup.txt
-          free -b > diagnostic/memory-before-build.txt
-          df -B1 -a > diagnostic/df-before-build.txt
-          lsblk -b -J -o NAME,PATH,SIZE,TYPE,FSTYPE,MOUNTPOINTS > diagnostic/lsblk-before-build.json
-          disk_available=$(df -B1 --output=avail / | tail -n 1 | tr -d ' ')
-          memory_total=$(awk '/^MemTotal:/ { printf "%.0f", $2 * 1024 }' /proc/meminfo)
-          cpu_count=$(nproc)
-          jq -n --argjson disk "$disk_available" --argjson memory "$memory_total" --argjson cpu "$cpu_count" \
-            '{disk_available_bytes:$disk,memory_total_bytes:$memory,cpu_count:$cpu,minimum_disk_bytes:100000000000,swap_bytes:17179869184,environment_guard:($disk>=100000000000 and $memory>=8000000000 and $cpu>=2)}' > diagnostic/build-environment.json
-          jq -e '.environment_guard' diagnostic/build-environment.json
-      - name: Compile and verify the exact local package
-        shell: bash
-        working-directory: termux-packages
-        run: |
-          set -euo pipefail
-          CI=true ./scripts/run-docker.sh /usr/bin/env NATIVE_CCACHE_RESTORED="${{ steps.native-cache.outputs.cache-hit }}" /bin/bash /home/builder/termux-packages/maintenance-inputs/build-stage.sh host-tools 2>&1 | tee ../diagnostic/container-build.log
-      - name: Preserve only the verified package and its complete payload manifest
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: chromium158-host-tools-${{ github.run_id }}
-          path: termux-packages/output/delivery/
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
-      - name: Collect build diagnostics and verify the bounded compiler checkpoint
-        if: always()
-        id: cache-checkpoint
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p diagnostic
-          if test -d termux-packages/output/maintenance-diagnostics; then
-            cp -a termux-packages/output/maintenance-diagnostics/. diagnostic/
-          fi
-          df -B1 -a > diagnostic/df-after-build.txt
-          free -b > diagnostic/memory-after-build.txt
-          if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
-            if docker exec "$CONTAINER_NAME" test -d /home/builder/termux-packages/output/maintenance-ccache; then
-              docker exec --env CCACHE_DIR=/home/builder/termux-packages/output/maintenance-ccache --env CCACHE_MAXSIZE=1900MB "$CONTAINER_NAME" /usr/bin/ccache --cleanup
-              docker exec --env CCACHE_DIR=/home/builder/termux-packages/output/maintenance-ccache "$CONTAINER_NAME" /usr/bin/ccache --show-stats --verbose > diagnostic/ccache-final.txt
-              cache_bytes=$(du -sb termux-packages/output/maintenance-ccache | cut -f1)
-              test "$cache_bytes" -le 2000000000
-              jq -n --argjson bytes "$cache_bytes" '{cache_bytes:$bytes,max_bytes:2000000000,kind:"C/C++ compiler results only",complete_build_tree:false}' > diagnostic/ccache-checkpoint.json
-              echo 'ready=true' >> "$GITHUB_OUTPUT"
-            fi
-          fi
-      - name: Remove only this job's temporary container and swap
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p diagnostic
-          if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
-            docker inspect "$CONTAINER_NAME" --format '{{json .State}}' > diagnostic/container-state-before-removal.json
-            docker rm --force "$CONTAINER_NAME" > diagnostic/container-removal.txt
-            if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then exit 1; fi
-          fi
-          swapfile="$RUNNER_TEMP/chromium158-maintenance.swap"
-          if swapon --noheadings --show=NAME | grep -Fx -- "$swapfile" >/dev/null; then
-            sudo swapoff "$swapfile"
-          fi
-          if test -f "$swapfile"; then sudo rm -- "$swapfile"; fi
-          test ! -e "$swapfile"
-          swapon --show --bytes > diagnostic/swap-after-cleanup.txt
-      - name: Save the first bounded cache checkpoint even after a compilation failure
-        if: always() && steps.cache-checkpoint.outputs.ready == 'true' && steps.native-cache.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: termux-packages/output/maintenance-ccache
-          key: native-chromium158-07f9482c-e2de051a-host-tools-ccache-v1
-
-      - name: Preserve build logs even when compilation or validation failed
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: chromium158-host-tools-diagnostics-${{ github.run_id }}
-          path: diagnostic/
-          if-no-files-found: error
-          retention-days: 7
-
   browser:
-    needs: host-tools
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-26.04
     timeout-minutes: 350
     env:
@@ -1112,7 +462,7 @@ jobs:
           # The host applied the reviewed patch before starting this confined container.
           sha256sum --check maintenance-inputs/prepared.sha256 > output/maintenance-diagnostics/prepared-source-check.txt
           git diff --check
-          git diff -- x11-packages/chromium/build.sh x11-packages/chromium-host-tools/build.sh > output/maintenance-diagnostics/recipes.patch
+          git diff -- x11-packages/chromium/build.sh x11-packages/chromium-host-tools/build.sh x11-packages/chromium-host-tools/jumbo-patches/0107-components.patch > output/maintenance-diagnostics/recipes.patch
           dpkg --validate-version '158.0.8127.36-0~termuxlocal1'
           dpkg --compare-versions '157.0.8103.78' lt '158.0.8127.36-0~termuxlocal1'
           dpkg --compare-versions '158.0.8127.36-0~termuxlocal1' lt '158.0.8127.36'
@@ -1151,21 +501,271 @@ jobs:
           sha256sum output/delivery/* > output/maintenance-diagnostics/delivery.sha256
           cat output/maintenance-diagnostics/package-verification.json
           CHROMIUM_MAINTENANCE_EOF
+          cat > termux-packages/maintenance-inputs/verify-components-source.py <<'CHROMIUM_MAINTENANCE_EOF'
+          #!/usr/bin/env python3
+          """Check the exact one-file effect of the official Chromium 158 jumbo fix."""
+          import hashlib
+          import json
+          from pathlib import Path
+          import sys
+          
+          SOURCE = 'components/password_manager/core/browser/remote_actor/remote_actor_credential_store_client.cc'
+          EXPECTED = {
+              'before': (9781, 'e3392e43c88c979fec85eb2a02efb31427b10a3105f2b8ef9e25e30cff2c543d'),
+              'after': (9892, 'cd7cebdc37eec096355c3b58e57603b05a5fbc720e27e8a489f8fe56e1114d98'),
+          }
+          
+          def verify(stage, source_root):
+              assert stage in EXPECTED
+              path = Path(source_root) / SOURCE
+              assert path.is_file() and not path.is_symlink()
+              data = path.read_bytes()
+              actual = (len(data), hashlib.sha256(data).hexdigest())
+              assert actual == EXPECTED[stage], {'stage': stage, 'source': SOURCE, 'actual': actual}
+              return {'status': 'EXACT_COMPONENTS_SOURCE_VERIFIED', 'stage': stage,
+                      'source_path': SOURCE, 'source_bytes': actual[0], 'source_sha256': actual[1],
+                      'source_version': '158.0.8127.36',
+                      'official_patch_commit': '67978763c9ff3a0179035f38a623b77b43d856f7'}
+          
+          if __name__ == '__main__':
+              assert len(sys.argv) == 3
+              print(json.dumps(verify(sys.argv[1], sys.argv[2])))
+          CHROMIUM_MAINTENANCE_EOF
+          cat > termux-packages/maintenance-inputs/apply-browser-backport.py <<'CHROMIUM_MAINTENANCE_EOF'
+          #!/usr/bin/env python3
+          """Add only the official components suffix after the reviewed 07f recovery."""
+          import hashlib
+          import json
+          from pathlib import Path
+          import subprocess
+          import sys
+          
+          BASE = '07f9482c02535417719d7f6398f649d4bc176a1c'
+          OFFICIAL = '67978763c9ff3a0179035f38a623b77b43d856f7'
+          PATCH_PATH = 'x11-packages/chromium-host-tools/jumbo-patches/0107-components.patch'
+          OLD_PATCH = 'c2522ea5f9993376ac273a52ed69828f3630722a731a79940ad10bf41139e5ec'
+          NEW_PATCH = '17a197a19a4ef14de28be34481374513a2c1159c231630d5f0035b609238fc43'
+          DELTA = '9db927b5daf7d02648ccf4a3dcd2e5a17baf62f8175b10dd795a54f5606172d4'
+          REPAIRED_BROWSER = '5394835fb80f7d34798eae4eabf276116f7b1a5a00beccb17579f789c22ba101'
+          REPAIRED_HOST = '36c6fb4a1b48e71874d849cc0a5ff53e3a9f7a315d5d6f237866746947bbaa12'
+          
+          def sha(data):
+              return hashlib.sha256(data).hexdigest()
+          
+          def apply(root, inputs):
+              root, inputs = Path(root).resolve(), Path(inputs).resolve()
+              assert subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip() == BASE
+              patch_path = root / PATCH_PATH
+              original = patch_path.read_bytes()
+              delta = (inputs / 'upstream-components-backport.patch').read_bytes()
+              assert len(original) == 108148 and sha(original) == OLD_PATCH
+              assert len(delta) == 530 and delta.count(b'\n') == 17 and sha(delta) == DELTA
+              updated = original + delta
+              assert len(updated) == 108678 and sha(updated) == NEW_PATCH
+              browser_path = root / 'x11-packages/chromium/build.sh'
+              browser = browser_path.read_bytes()
+              host = (root / 'x11-packages/chromium-host-tools/build.sh').read_bytes()
+              assert sha(browser) == REPAIRED_BROWSER and sha(host) == REPAIRED_HOST
+              before = '\t# Apply patches for jumbo build\n'
+              after = '\t# Use some system libs\n'
+              text = browser.decode()
+              assert text.count(before) == text.count(after) == 1
+              def guard(stage):
+                  return ('\t/usr/bin/python3 "$TERMUX_SCRIPTDIR/maintenance/chromium158/verify-components-source.py" '
+                          + stage + ' "$TERMUX_PKG_SRCDIR" > '
+                          '"$TERMUX_SCRIPTDIR/output/maintenance-diagnostics/chromium/components-source-'
+                          + stage + '.json"\n\n')
+              text = text.replace(before, guard('before') + before, 1)
+              text = text.replace(after, guard('after') + after, 1)
+              subprocess.run(['bash', '-n'], input=text, text=True, check=True)
+              helper = (inputs / 'verify-components-source.py').read_bytes()
+              compile(helper, 'verify-components-source.py', 'exec')
+              destination = root / 'maintenance/chromium158/verify-components-source.py'
+              assert not destination.exists()
+              # Every identity and shell check above completes before any source mutation.
+              patch_path.write_bytes(updated)
+              browser_path.write_text(text)
+              destination.write_bytes(helper)
+              assert (root / 'x11-packages/chromium-host-tools/build.sh').read_bytes() == host
+              return {'status': 'OFFICIAL_COMPONENTS_BACKPORT_APPLIED_NOT_BUILT',
+                      'base_source_commit': BASE, 'official_patch_commit': OFFICIAL,
+                      'patch_path': PATCH_PATH, 'old_patch_sha256': OLD_PATCH,
+                      'new_patch_sha256': NEW_PATCH, 'delta_bytes': len(delta),
+                      'delta_lines': 17, 'delta_sha256': DELTA,
+                      'browser_recipe_sha256': sha(text.encode()),
+                      'host_tools_recipe_sha256': REPAIRED_HOST,
+                      'host_tools_recipe_unchanged_from_verified_producer': True,
+                      'exact_cipd_python_recovery_preserved': True,
+                      'source_before_and_after_hash_checks_inserted': True,
+                      'new_source_guard_sha256': sha(helper)}
+          
+          if __name__ == '__main__':
+              assert len(sys.argv) == 2
+              print(json.dumps(apply(sys.argv[1], Path(__file__).resolve().parent), indent=2))
+          CHROMIUM_MAINTENANCE_EOF
+          cat > termux-packages/maintenance-inputs/verify-host-artifact.py <<'CHROMIUM_MAINTENANCE_EOF'
+          #!/usr/bin/env python3
+          """Bind the browser-only job to the already verified producer and exact bytes."""
+          import hashlib
+          import importlib.util
+          import json
+          import os
+          from pathlib import Path
+          import stat
+          import sys
+          from urllib.request import Request, urlopen
+          
+          REPO = 'shaterguy/termux-watchdog-android'
+          RUN = 44861121614
+          JOB = 136714503469
+          ARTIFACT = 14694696783
+          HEAD = '8e749a9f3cde03e69abd5c36815c2ff4ac0bfd85'
+          ZIP_SHA = '5492a65dd6acdba30ee496e64351105f94ddd0a6f8929b1151f421ab87777b04'
+          DEB = 'chromium-host-tools_158.0.8127.36-0~termuxlocal1_aarch64.deb'
+          FILES = {
+              DEB: (57637288, 'e7ec62b3dfc112caa05ebfee77f2adcb205353a53bda453fb9c9c673d98865e3'),
+              'manifest.json': (7462, 'c1a13d164d0f4b0ec86c7424df7edc30ac8711231742c0292dee4c4409a26275'),
+          }
+          OLD_CACHE = 'native-chromium158-07f9482c-e2de051a-browser-ccache-v1'
+          NEW_CACHE = 'native-chromium158-07f9482c-e2de051a-browser-components-17a197a1-ccache-v1'
+          
+          def api(path):
+              request = Request('https://api.github.com/repos/' + REPO + path,
+                                headers={'Accept': 'application/vnd.github+json',
+                                         'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                                         'X-GitHub-Api-Version': '2022-11-28',
+                                         'User-Agent': 'chromium158-maintenance-verifier'})
+              with urlopen(request, timeout=45) as response:
+                  assert response.status == 200
+                  return json.load(response)
+          
+          def metadata(out):
+              out = Path(out)
+              artifact = api('/actions/artifacts/' + str(ARTIFACT))
+              job = api('/actions/jobs/' + str(JOB))
+              assert artifact['id'] == ARTIFACT and artifact['name'] == 'chromium158-host-tools-' + str(RUN)
+              assert artifact['size_in_bytes'] == 57645102 and artifact['expired'] is False
+              assert artifact['digest'] == 'sha256:' + ZIP_SHA
+              assert artifact['workflow_run']['id'] == RUN and artifact['workflow_run']['head_sha'] == HEAD
+              assert job['id'] == JOB and job['run_id'] == RUN and job['name'] == 'host-tools'
+              assert job['head_sha'] == HEAD and job['status'] == 'completed' and job['conclusion'] == 'success'
+              out.mkdir(parents=True, exist_ok=True)
+              (out / 'host-tools-producer-artifact.json').write_text(json.dumps(artifact, indent=2) + '\n')
+              (out / 'host-tools-producer-job.json').write_text(json.dumps(job, indent=2) + '\n')
+              # Auxiliary cache lookup failure does not invalidate a verified package.
+              # It disables new cache publication so a transient restore failure cannot
+              # create a second browser snapshot in addition to the existing 2GB one.
+              policy = {'old_cache_key': OLD_CACHE, 'new_cache_key': NEW_CACHE,
+                        'metadata_lookup_succeeded': False, 'save_new_cache': False,
+                        'native_maximum_logical_cache_bytes': 4000000000}
+              try:
+                  caches = api('/actions/caches?key=' + OLD_CACHE + '&per_page=100')
+                  matches = [c for c in caches['actions_caches'] if c['key'] == OLD_CACHE]
+                  assert caches['total_count'] <= 100
+                  policy.update(metadata_lookup_succeeded=True, old_exact_cache_count=len(matches),
+                                old_cache_sizes=[c['size_in_bytes'] for c in matches],
+                                save_new_cache=not matches)
+              except Exception as error:
+                  policy['lookup_error_type'] = type(error).__name__
+              (out / 'browser-cache-policy.json').write_text(json.dumps(policy, indent=2) + '\n')
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+                  output.write('save_new_cache=' + str(policy['save_new_cache']).lower() + '\n')
+              return {'status': 'PINNED_SUCCESSFUL_HOST_TOOLS_PRODUCER_VERIFIED',
+                      'run_id': RUN, 'job_id': JOB, 'artifact_id': ARTIFACT,
+                      'producer_whole_run_completion_required': False,
+                      'archive_sha256': ZIP_SHA, 'cache_policy': policy}
+          
+          def payload(root, helper):
+              root = Path(root)
+              assert root.is_dir() and not root.is_symlink()
+              assert {p.name for p in root.iterdir()} == set(FILES)
+              records = {}
+              for name, expected in FILES.items():
+                  path = root / name
+                  info = path.lstat()
+                  assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                  with path.open('rb') as stream:
+                      actual = (info.st_size, hashlib.file_digest(stream, 'sha256').hexdigest())
+                  assert actual == expected, {'unexpected_input': name, 'actual': actual}
+                  records[name] = {'bytes': actual[0], 'sha256': actual[1]}
+              spec = importlib.util.spec_from_file_location('package_manifest', helper)
+              module = importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(module)
+              manifest = json.loads((root / 'manifest.json').read_text())
+              assert manifest['filename'] == DEB and manifest['source_commit'] == '07f9482c02535417719d7f6398f649d4bc176a1c'
+              assert manifest['package'] == {'package': 'chromium-host-tools', 'version': '158.0.8127.36-0~termuxlocal1', 'architecture': 'aarch64'}
+              assert module.metadata(root / DEB) == manifest['package']
+              assert module.payload(root / DEB) == manifest['payload']
+              assert len(manifest['payload']) == 31
+              return {'status': 'PINNED_HOST_TOOLS_BYTES_AND_COMPLETE_PAYLOAD_VERIFIED',
+                      'producer_run_id': RUN, 'producer_artifact_id': ARTIFACT,
+                      'files': records, 'payload_entries': 31,
+                      'mixed_host_and_target_elf_architectures_allowed': True}
+          
+          if __name__ == '__main__':
+              if len(sys.argv) == 3 and sys.argv[1] == 'metadata':
+                  result = metadata(sys.argv[2])
+              elif len(sys.argv) == 4 and sys.argv[1] == 'payload':
+                  result = payload(sys.argv[2], sys.argv[3])
+              else:
+                  raise SystemExit('metadata DIAGNOSTIC_DIR | payload INPUT_DIR PACKAGE_HELPER')
+              print(json.dumps(result, indent=2))
+          CHROMIUM_MAINTENANCE_EOF
+          cat > termux-packages/maintenance-inputs/upstream-components-backport.patch <<'CHROMIUM_MAINTENANCE_EOF'
+          --- a/components/password_manager/core/browser/remote_actor/remote_actor_credential_store_client.cc
+          +++ b/components/password_manager/core/browser/remote_actor/remote_actor_credential_store_client.cc
+          @@ -37,6 +37,8 @@
+           #include "services/network/public/cpp/shared_url_loader_factory.h"
+           #include "url/gurl.h"
+           
+          +#define GetEndpointUrlBase GetEndpointUrlBase_remote_actor_credential_store_client
+          +
+           namespace password_manager {
+           
+           namespace {
+          @@ -238,3 +240,5 @@
+           }
+           
+           }  // namespace password_manager
+          +
+          +#undef GetEndpointUrlBase
+          CHROMIUM_MAINTENANCE_EOF
           sha256sum termux-packages/maintenance-inputs/* > diagnostic/maintenance-inputs.sha256
           mkdir -p termux-packages/output/maintenance-diagnostics
           python3 termux-packages/maintenance-inputs/apply-recovery.py termux-packages > termux-packages/output/maintenance-diagnostics/source-patch.json
+          python3 termux-packages/maintenance-inputs/apply-browser-backport.py termux-packages > termux-packages/output/maintenance-diagnostics/source-backport.json
           git -C termux-packages diff --check
           (
             cd termux-packages
             sha256sum x11-packages/chromium/build.sh x11-packages/chromium-host-tools/build.sh \
-              maintenance/chromium158/*.py maintenance-inputs/*.py maintenance-inputs/build-stage.sh > maintenance-inputs/prepared.sha256
+              x11-packages/chromium-host-tools/jumbo-patches/0107-components.patch \
+              maintenance/chromium158/*.py maintenance-inputs/*.py maintenance-inputs/*.patch maintenance-inputs/build-stage.sh > maintenance-inputs/prepared.sha256
           )
           cp termux-packages/maintenance-inputs/prepared.sha256 diagnostic/prepared.sha256
-      - name: Download this run's exact 158 host-tools package and payload manifest
+      - name: Verify the fixed successful producer and published artifact identity
+        id: pin-host-tools
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 termux-packages/maintenance-inputs/verify-host-artifact.py metadata diagnostic > diagnostic/host-tools-producer-verification.json
+      - name: Download only the verified prior-run host-tools artifact
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: chromium158-host-tools-${{ github.run_id }}
+          artifact-ids: '14694696783'
+          repository: shaterguy/termux-watchdog-android
+          run-id: '44861121614'
+          github-token: ${{ github.token }}
+          digest-mismatch: error
           path: termux-packages/output/host-tools-input
+      - name: Recompute the fixed DEB and manifest hashes and every payload entry
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 termux-packages/maintenance-inputs/verify-host-artifact.py payload \
+            termux-packages/output/host-tools-input termux-packages/maintenance-inputs/package-manifest.py \
+            > diagnostic/host-tools-input-full-verification.json
       - name: Add ccache to the pinned parent image before starting the confined builder
         shell: bash
         run: |
@@ -1232,7 +832,19 @@ jobs:
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: termux-packages/output/maintenance-ccache
-          key: native-chromium158-07f9482c-e2de051a-browser-ccache-v1
+          key: native-chromium158-07f9482c-e2de051a-browser-components-17a197a1-ccache-v1
+          restore-keys: native-chromium158-07f9482c-e2de051a-browser-ccache-v1
+      - name: Accept only the two explicitly scoped compiler cache identities
+        shell: bash
+        env:
+          MATCHED_KEY: ${{ steps.native-cache.outputs.cache-matched-key }}
+        run: |
+          set -euo pipefail
+          case "$MATCHED_KEY" in
+            ""|native-chromium158-07f9482c-e2de051a-browser-ccache-v1|native-chromium158-07f9482c-e2de051a-browser-components-17a197a1-ccache-v1) ;;
+            *) echo "Unexpected cache identity" >&2; exit 1 ;;
+          esac
+          jq -n --arg key "$MATCHED_KEY" '{matched_key:$key,read_only:($key!=""),save_only_if_no_old_snapshot:true}' > diagnostic/browser-cache-restored.json
 
       - name: Reserve job-local swap and verify this fresh runner's remaining capacity
         shell: bash
@@ -1259,7 +871,7 @@ jobs:
         working-directory: termux-packages
         run: |
           set -euo pipefail
-          CI=true ./scripts/run-docker.sh /usr/bin/env NATIVE_CCACHE_RESTORED="${{ steps.native-cache.outputs.cache-hit }}" /bin/bash /home/builder/termux-packages/maintenance-inputs/build-stage.sh browser 2>&1 | tee ../diagnostic/container-build.log
+          CI=true ./scripts/run-docker.sh /usr/bin/env NATIVE_CCACHE_RESTORED="${{ steps.native-cache.outputs.cache-matched-key != '' }}" /bin/bash /home/builder/termux-packages/maintenance-inputs/build-stage.sh browser 2>&1 | tee ../diagnostic/container-build.log
       - name: Preserve only the verified package and its complete payload manifest
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
@@ -1309,12 +921,12 @@ jobs:
           test ! -e "$swapfile"
           swapon --show --bytes > diagnostic/swap-after-cleanup.txt
       - name: Save the first bounded cache checkpoint even after a compilation failure
-        if: always() && steps.cache-checkpoint.outputs.ready == 'true' && steps.native-cache.outputs.cache-hit != 'true'
+        if: always() && steps.cache-checkpoint.outputs.ready == 'true' && steps.native-cache.outputs.cache-matched-key == '' && steps.pin-host-tools.outputs.save_new_cache == 'true'
         continue-on-error: true
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: termux-packages/output/maintenance-ccache
-          key: native-chromium158-07f9482c-e2de051a-browser-ccache-v1
+          key: native-chromium158-07f9482c-e2de051a-browser-components-17a197a1-ccache-v1
 
       - name: Preserve build logs even when compilation or validation failed
         if: always()
