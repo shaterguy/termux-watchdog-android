@@ -1,4 +1,4 @@
-name: Inspect Alpine Chromium 158 ARM64 build resources
+name: Build Alpine Chromium 158 on the verified ARM64 runner
 
 on:
   push:
@@ -11,182 +11,903 @@ permissions:
   contents: read
 
 concurrency:
-  group: alpine-chromium158-arm-preflight-${{ github.ref }}
+  group: alpine-chromium158-native-build-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  inspect:
+  build:
     if: github.repository == 'shaterguy/termux-watchdog-android' && github.event_name == 'push' && github.ref == 'refs/heads/maintenance/20261121-alpine-chromium158-builder'
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
+    timeout-minutes: 360
     env:
-      # Official docker-library/repo-info, repos/alpine/remote/3.24.4.md,
-      # Git blob 93ce4ab619abf4f27dbe54f76244a4edc39d46da.
       ALPINE_IMAGE: docker.io/library/alpine@sha256:1829893486be257df5049ab3b7fc95afbd0fc09d89803cbc580bda1ba5386b29
       ALPINE_IMAGE_ID: sha256:abbc135a7d3909a5eb6a56aac4c769cf15be025e3c9e226b8660f2b2b378158b
-      PROBE_CONTAINER: alpine-chromium158-maintenance-probe
+      BUILD_CONTAINER: alpine-chromium158-native-build
       MINIMUM_FREE_BYTES: '100000000000'
     steps:
-      - name: Record the actual ephemeral ARM64 runner
+      - name: Retain the verified ARM64 environment and one-job time budget
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p diagnostic
+          mkdir -p delivery/evidence delivery/logs build-state/inputs build-state/scripts build-state/ccache
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$(uname -m)" = aarch64
-          for program in docker jq stat df findmnt lsblk realpath mountpoint; do
-            command -v "$program"
-          done > diagnostic/host-command-paths.txt
+          test "$(nproc)" -ge 4
+          memory=$(awk '/^MemTotal:/ {printf "%.0f", $2 * 1024}' /proc/meminfo)
+          test "$memory" -ge 16000000000
+          deadline=$(( $(date +%s) + 335 * 60 ))
+          printf 'BUILD_DEADLINE_EPOCH=%s\n' "$deadline" >> "$GITHUB_ENV"
+          jq -n --argjson deadline "$deadline" --argjson memory "$memory" --arg commit "$GITHUB_SHA" \
+            '{workflow_commit:$commit,deadline_epoch:$deadline,job_limit_minutes:360,work_budget_minutes:335,reserved_finalization_minutes:25,ninja_jobs:4,cargo_jobs:4,go_jobs:4,memory_total_bytes:$memory,minimum_memory_bytes:16000000000,ccache_max_bytes:5000000000}' > delivery/evidence/run-budget.json
           {
             date -u +%FT%TZ
             uname -a
-            cat /etc/os-release
-            printf 'cpu_count='; nproc
+            nproc
             awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/ { print }' /proc/meminfo
             df -B1 --output=source,size,used,avail,target / "$GITHUB_WORKSPACE"
-          } > diagnostic/host-before.txt
-          jq -n --arg image_os "${ImageOS:-}" --arg image_version "${ImageVersion:-}" \
-            --arg architecture "$RUNNER_ARCH" --arg run_id "$GITHUB_RUN_ID" --arg commit "$GITHUB_SHA" \
-            '{image_os:$image_os,image_version:$image_version,runner_arch:$architecture,run_id:$run_id,workflow_commit:$commit}' > diagnostic/runner-image.json
-          lsblk -b -J -o NAME,PATH,SIZE,TYPE,FSTYPE,MOUNTPOINTS,PKNAME,RO > diagnostic/lsblk-before.json
-          findmnt --json -o TARGET,SOURCE,FSTYPE,OPTIONS > diagnostic/findmnt-before.json
-          docker version --format '{{json .}}' > diagnostic/docker-version.json
-          docker info --format '{{json .}}' | jq '{ServerVersion,Architecture,OSType,OperatingSystem,Driver,DockerRootDir,Images,Containers,ContainersRunning,MemTotal,NCPU}' > diagnostic/docker-info.json
-          docker system df > diagnostic/docker-storage-before.txt
+            docker version --format '{{.Server.Version}}'
+          } > delivery/evidence/host-before.txt
 
-      - name: Start the pinned official Alpine ARM64 container
+      - name: Materialize the reviewed public-input manifest and build driver
         shell: bash
         run: |
           set -euo pipefail
-          docker pull --platform linux/arm64 "$ALPINE_IMAGE" > diagnostic/image-pull.txt 2>&1
-          docker image inspect "$ALPINE_IMAGE" | jq 'map({Id,RepoDigests,Architecture,Os,Size})' > diagnostic/image-identity.json
+          cat > build-state/inputs/RECIPE-GIT-BLOBS.json <<'RECIPE_GIT_BLOBS_json'
+          [
+            {
+              "name": "APKBUILD",
+              "sha": "c2e4d7719428dc02ab89717e0fc0cbb116a62922",
+              "url": "https://raw.githubusercontent.com/alpinelinux/aports/2116874b4e60aff6f0793aeecf4cf3d1b66fa2a6/community/chromium/APKBUILD",
+              "size": 36101
+            },
+            {
+              "name": "chromium-launcher.sh",
+              "sha": "5cf72c1251bd0d2e1bae615b0b46cf6fd9719206",
+              "url": "https://raw.githubusercontent.com/alpinelinux/aports/2116874b4e60aff6f0793aeecf4cf3d1b66fa2a6/community/chromium/chromium-launcher.sh",
+              "size": 1019
+            },
+            {
+              "name": "chromium.conf",
+              "sha": "c163d6f3dec1429738a922141ac7a4659365cc33",
+              "url": "https://raw.githubusercontent.com/alpinelinux/aports/2116874b4e60aff6f0793aeecf4cf3d1b66fa2a6/community/chromium/chromium.conf",
+              "size": 171
+            },
+            {
+              "name": "compiler.patch",
+              "sha": "ef53a12a8cdf39440812abb3722bd78226c48f92",
+              "url": "https://raw.githubusercontent.com/alpinelinux/aports/2116874b4e60aff6f0793aeecf4cf3d1b66fa2a6/community/chromium/compiler.patch",
+              "size": 9542
+            },
+            {
+              "name": "disable-dns_config_service.patch",
+              "sha": "731a7516f038c746a80dbf6fb3c75c774589c791",
+              "url": "https://raw.githubusercontent.com/alpinelinux/aports/2116874b4e60aff6f0793aeecf4cf3d1b66fa2a6/community/chromium/disable-dns_config_service.patch",
+              "size": 678
+            },
+            {
+              "name": "disable-failing-tests.patch",
+              "sha": "9351ea07bb668be8dd3a5de67ce6b972e1244df7",
+              "url": "https://raw.githubusercontent.com/alpinelinux/aports/2116874b4e60aff6f0793aeecf4cf3d1b66fa2a6/community/chromium/disable-failing-tests.patch",
+              "size": 536
+            },
+            {
+              "name": "fix-ffmpeg-codec-list.patch",
+              "sha": "de24f660f5147bfc8f817418f4aabe50eaa0ccad",
+              "url": "https://raw.githubusercontent.com/alpinelinux/aports/2116874b4e60aff6f0793aeecf4cf3d1b66fa2a6/community/chromium/fix-ffmpeg-codec-list.patch",
+              "size": 586
+            },
+            {
+              "name": "fstatat-32bit.patch",
+              "sha": "1627ffa7e6478900d982687247ee8e35b1c4de85",
+              "url": "https://raw.githubusercontent.com/alpinelinux/aports/2116874b4e60aff6f0793aeecf4cf3d1b66fa2a6/community/chromium/fstatat-32bit.patch",
+              "size": 695
+            },
+            {
+              "name": "gdbinit.patch",
+              "sha": "5958631ec6b64496a53e048199586278927bce31",
+              "url": "https://raw.githubusercontent.com/alpinelinux/aports/2116874b4e60aff6f0793aeecf4cf3d1b66fa2a6/community/chromium/gdbinit.patch",
+              "size": 616
+            },
+            {
+              "name": "google-api.keys",
+              "sha": "8cd0f0ab099ed85494704717c7ba29401690bacc",
+              "url": "https://raw.githubusercontent.com/alpinelinux/aports/2116874b4e60aff6f0793aeecf4cf3d1b66fa2a6/community/chromium/google-api.keys",
+              "size": 722
+            },
+            {
+              "name": "headless-shell-no-license.patch",
+              "sha": "6a6027d13bcf87a91a5c9d2dc060783c191a2509",
+              "url": "https://raw.githubusercontent.com/alpinelinux/aports/2116874b4e60aff6f0793aeecf4cf3d1b66fa2a6/community/chromium/headless-shell-no-license.patch",
+              "size": 708
+            },
+            {
+              "name": "musl-conditional-tkill.patch",
+              "sha": "337719cb3d9e93bf91709cfc5a852a8df65b3018",
+              "url": "https://raw.githubusercontent.com/alpinelinux/aports/2116874b4e60aff6f0793aeecf4cf3d1b66fa2a6/community/chromium/musl-conditional-tkill.patch",
+              "size": 3858
+            },
+            {
+              "name": "musl-sandbox.patch",
+              "sha": "92f81f018623dccbcc123fc584a04f7efbfaab39",
+              "url": "https://raw.githubusercontent.com/alpinelinux/aports/2116874b4e60aff6f0793aeecf4cf3d1b66fa2a6/community/chromium/musl-sandbox.patch",
+              "size": 5152
+            },
+            {
+              "name": "musl-tid-caching.patch",
+              "sha": "498ce82731701db6cae1c2e94a49a2bf8fa10da8",
+              "url": "https://raw.githubusercontent.com/alpinelinux/aports/2116874b4e60aff6f0793aeecf4cf3d1b66fa2a6/community/chromium/musl-tid-caching.patch",
+              "size": 2147
+            },
+            {
+              "name": "net-test-no-vpython.patch",
+              "sha": "efb29203014ea793fdd7360e7c588946fb7c74bf",
+              "url": "https://raw.githubusercontent.com/alpinelinux/aports/2116874b4e60aff6f0793aeecf4cf3d1b66fa2a6/community/chromium/net-test-no-vpython.patch",
+              "size": 819
+            },
+            {
+              "name": "net-test-pyws3-py3.12.patch",
+              "sha": "52b183922e9e4f65e77c006a6b55d57b9e2197da",
+              "url": "https://raw.githubusercontent.com/alpinelinux/aports/2116874b4e60aff6f0793aeecf4cf3d1b66fa2a6/community/chromium/net-test-pyws3-py3.12.patch",
+              "size": 1902
+            },
+            {
+              "name": "no-execinfo.patch",
+              "sha": "12064bad0a31bf142d1384282339af6d587c0174",
+              "url": "https://raw.githubusercontent.com/alpinelinux/aports/2116874b4e60aff6f0793aeecf4cf3d1b66fa2a6/community/chromium/no-execinfo.patch",
+              "size": 2245
+            },
+            {
+              "name": "no-mallinfo.patch",
+              "sha": "1f2d541814c3abf387c4c4860e5799abb8bee01d",
+              "url": "https://raw.githubusercontent.com/alpinelinux/aports/2116874b4e60aff6f0793aeecf4cf3d1b66fa2a6/community/chromium/no-mallinfo.patch",
+              "size": 4729
+            },
+            {
+              "name": "no-res-ninit-nclose.patch",
+              "sha": "d74f6cd88c92b99fd8d83a8abf04fabb3d5f9702",
+              "url": "https://raw.githubusercontent.com/alpinelinux/aports/2116874b4e60aff6f0793aeecf4cf3d1b66fa2a6/community/chromium/no-res-ninit-nclose.patch",
+              "size": 1039
+            },
+            {
+              "name": "no-sandbox-settls.patch",
+              "sha": "02b3b4c49c817b764166a28ffc1dc60289be1fe6",
+              "url": "https://raw.githubusercontent.com/alpinelinux/aports/2116874b4e60aff6f0793aeecf4cf3d1b66fa2a6/community/chromium/no-sandbox-settls.patch",
+              "size": 631
+            },
+            {
+              "name": "partalloc-no-tagging-arm64.patch",
+              "sha": "422fcf5da52ef72eaad24af2e0f069be0ddbd109",
+              "url": "https://raw.githubusercontent.com/alpinelinux/aports/2116874b4e60aff6f0793aeecf4cf3d1b66fa2a6/community/chromium/partalloc-no-tagging-arm64.patch",
+              "size": 1108
+            },
+            {
+              "name": "pvalloc.patch",
+              "sha": "145e05b2d8620b4c0d3a795e2bc989e4568431fc",
+              "url": "https://raw.githubusercontent.com/alpinelinux/aports/2116874b4e60aff6f0793aeecf4cf3d1b66fa2a6/community/chromium/pvalloc.patch",
+              "size": 1430
+            },
+            {
+              "name": "temp-failure-retry.patch",
+              "sha": "560aa6578c2e1857989bdad35981b1cd5cef9df1",
+              "url": "https://raw.githubusercontent.com/alpinelinux/aports/2116874b4e60aff6f0793aeecf4cf3d1b66fa2a6/community/chromium/temp-failure-retry.patch",
+              "size": 713
+            }
+          ]
+          RECIPE_GIT_BLOBS_json
+          cat > build-state/inputs/SOURCE-MANIFEST.json <<'SOURCE_MANIFEST_json'
+          [
+            {
+              "name": "chromium-158.0.8127.36-linux.tar.xz",
+              "url": "https://github.com/chromium-linux-tarballs/chromium-tarballs/releases/download/158.0.8127.36/chromium-158.0.8127.36-linux.tar.xz",
+              "sha512": "31e3995a5caa1a64ab4e9711819ef160a78d29647ff3145a38089151f0b7cfa4b5c0b488c1a6351c9c5a425715ab4ae3569bd152fb8f25c34e0bded2e9ebfdbc"
+            },
+            {
+              "name": "test_fonts-a28b222b79851716f8358d2800157d9ffe117b3545031ae51f69b7e1e1b9a969.tar.gz",
+              "url": "https://chromium-fonts.storage.googleapis.com/a28b222b79851716f8358d2800157d9ffe117b3545031ae51f69b7e1e1b9a969",
+              "sha512": "ca4f98300f2037a40e02f6c2ffa04427fdf08cdce8de34cc944a5ccb69d4279090d2b8476d5e77bd610db6542696eb3ed4d135c3462fc0375cbf9277bf2fa670"
+            },
+            {
+              "name": "copium-158.1.tar.gz",
+              "url": "https://ab-sn.lnl.gay/copium-158.1.tar.gz",
+              "sha512": "91a582025822f84d674a9a5d8c6c9bf65d1fe794d55ce8520de73e2e539095c646e6dd72d3abb8dbdc0f84331d7e6f57231bd32c3fcd7b475ca6db80b1b1906b"
+            },
+            {
+              "name": "crubit-40fbac34597084a0863256d633889eac2c23b91b.tar.gz",
+              "url": "https://github.com/google/crubit/archive/40fbac34597084a0863256d633889eac2c23b91b/crubit-40fbac34597084a0863256d633889eac2c23b91b.tar.gz",
+              "sha512": "866c246cb0bcde71509e088ad77c400b9791f63d343dca13df45d034b8276f318a758ab040fbddb496a2869d3a128569fee48f682da2425237b60babbe2f7151"
+            },
+            {
+              "name": "chromium-launcher.sh",
+              "url": null,
+              "sha512": "1b16564f85a03f3eb934ec51289dc6159e2454202d40f48354f947d6ceffac8889e9eb4c0f4dfaafb3a15101566d54039f832bc9a8433c3c463e2d1dac2d2acc"
+            },
+            {
+              "name": "chromium.conf",
+              "url": null,
+              "sha512": "9cfcb41d69c5a515b6f9fe2a629579fa499e1f48eb58a0ce4ec8e5029d450bcafb6d963019aaac9a6838244bee9f9ba7fe5ef6146a0ca6b20fcda4ab7f059476"
+            },
+            {
+              "name": "google-api.keys",
+              "url": null,
+              "sha512": "2d8237a940ea691bd10b08315429677a587f7ef9692a0cca53bfd066eae82998a6c71f402a8669e9de39f94d7f3280745d1628ea6eac5d76ca7116844d4e0dac"
+            },
+            {
+              "name": "compiler.patch",
+              "url": null,
+              "sha512": "25effbae3bd26c84a2bab1cf8bdeeea185412fa387226efd4bb536dc1bdd3615594e01a53bcd1d1fdb79aaa53165c731f1fa2c7251eaee6ddd1a8b9f59593259"
+            },
+            {
+              "name": "disable-dns_config_service.patch",
+              "url": null,
+              "sha512": "1bee1448e409fedff635388ee6f1efa6d23c29ae3e6b6fd31452c56974adb40fcd0088c82d1e643d549154663e402942cbab9807dff5aff2d8997a09de6f5655"
+            },
+            {
+              "name": "disable-failing-tests.patch",
+              "url": null,
+              "sha512": "0ef9168b8b1a4779bc4c8df718735e06d29e459dcfd00f8cbf9a4edaf9fade8089225219e46dead7de81de716bddc8d745dc2069db0ee7f7e5d2f64c5236e2ab"
+            },
+            {
+              "name": "fix-ffmpeg-codec-list.patch",
+              "url": null,
+              "sha512": "87f63d83139562e058f3f649eb1f62bf100dd92c2bb6ee393fdce0c8f7d7c188a7062394647aafe4e82c0a8fbbffeb613edc5c8dd9415dd9dda777827ea371c5"
+            },
+            {
+              "name": "fstatat-32bit.patch",
+              "url": null,
+              "sha512": "c63dee5044353eb306a39ca1526158c0f003ab310ecb03d1c368dc2a979454590c84b8d3c15484517d5e66bb8add9b231da9abbadf2e50850abd72ac1345c4ab"
+            },
+            {
+              "name": "gdbinit.patch",
+              "url": null,
+              "sha512": "33ee60863cc438ef57ffef92ba4cf67a856a5ffc16138bce241bcf87e47b15154aa86918e793c26f7ec4dc62a445257ad5673ed7001daf22c4043cf6cc57da7f"
+            },
+            {
+              "name": "headless-shell-no-license.patch",
+              "url": null,
+              "sha512": "a94cf7a0670abf5178abba33c619cc6d41d73f2e16c7a1fd5b152152f5077df103e049d166e3b8627797c38113821d2f2e6b64cd48d132c1e90ad32d63a349f5"
+            },
+            {
+              "name": "musl-conditional-tkill.patch",
+              "url": null,
+              "sha512": "0e4c257456db52935ab88cd6ced10c2c3818a5c08a504df575e83ad6c82e23afa541073f87c59feae19978b1bf83b9432cf3ce2c295f499d0df1737a051bccf7"
+            },
+            {
+              "name": "musl-sandbox.patch",
+              "url": null,
+              "sha512": "eceada6c3a91b56a65679c5c62a5075c9643654cdc0240f78fdb5e21ae887c25c191984179bef425d2d721ce50e0d47133c623ea010346db904c1ef067e8dd92"
+            },
+            {
+              "name": "musl-tid-caching.patch",
+              "url": null,
+              "sha512": "e7163ac5810ac85366cef2447412287c856e3d67c6b77f219a6e5a418b1965b98e449c409424ad0704a5bded9355dd0aec3dc4585918ce5a2ab36c079707afe2"
+            },
+            {
+              "name": "net-test-no-vpython.patch",
+              "url": null,
+              "sha512": "3b7420d58d13dfc4baab5065e3017f666f51fed6de087af42a660a839d7b4444b50d1a93204322d213df36c6722eaf6b08d46d50dc374198a342da2675fafff5"
+            },
+            {
+              "name": "net-test-pyws3-py3.12.patch",
+              "url": null,
+              "sha512": "32489cddf4caf665d7f466c62bd4b031c883f1b94fe9af6cff64fb55694f0dd0c45c60b6633e4c154f255b661258adb34b4055c1bd6ee14764b590f4cc367209"
+            },
+            {
+              "name": "no-execinfo.patch",
+              "url": null,
+              "sha512": "a250cff50d282b02ce0f28880d0a2b4fb8e7df51bc072bfeeddc561c29a7c76453dbcbc7b17b82966a7b30a31409d2555720d1dcf963e1b3fb8a2a06a6abcf46"
+            },
+            {
+              "name": "no-mallinfo.patch",
+              "url": null,
+              "sha512": "0b41aeb6b212f9c3f61aa0a8d3085c9e865a2e68f3270ceec2376aab67f337ac46eaea7da36d3fd7219e2a1cb731b7aa2d3fb619a374d2b7653976b9f4f384bb"
+            },
+            {
+              "name": "no-res-ninit-nclose.patch",
+              "url": null,
+              "sha512": "e4c4e5bc6f828f9c883dd418c0ba01887949c29c311f76206a1ec29f620b0c0ba0452949dc2778a9c46ea066405857536964a36436a68eecf7da7952736333cf"
+            },
+            {
+              "name": "no-sandbox-settls.patch",
+              "url": null,
+              "sha512": "6dc4d8dc92e685dace62265a1ddb3aebc558aed54d20ff6d36b030be0c48d7e84662326c31363612492574d9a03c62653cdc21a60995b97dee1d75cae86a9f9b"
+            },
+            {
+              "name": "partalloc-no-tagging-arm64.patch",
+              "url": null,
+              "sha512": "b75908a45ee2f4f806eec8d86fca2f51fda3531b88de48ef4539c364a40d7e2897cdaf38b715682d712648e3f43aac983055e688385f85fa7b7204ffb6d617e1"
+            },
+            {
+              "name": "pvalloc.patch",
+              "url": null,
+              "sha512": "03f829a2da633533ef3fd0f287f5ec602d936a97a98b53cd2415553c2537ae9d571f35397ca7c9fb3f4b0806c300e3b189569f8d979ca132e1a2a4dae7206396"
+            },
+            {
+              "name": "temp-failure-retry.patch",
+              "url": null,
+              "sha512": "e48693e6b7aeebf69a5acbf80d9a35defe4c23835121dfeb58b051ac7c527e758a41004f4d193274fe1b01c0bfb1dbc77b09cb6a404a3fdee507a2918afb0edb"
+            }
+          ]
+          SOURCE_MANIFEST_json
+          cat > build-state/inputs/MAKEDEPENDS.json <<'MAKEDEPENDS_json'
+          [
+            "alsa-lib-dev",
+            "bash",
+            "bison",
+            "bsd-compat-headers",
+            "brotli-dev",
+            "bzip2-dev",
+            "cairo-dev",
+            "clang22-dev",
+            "clang22-extra-tools",
+            "clang22-rtlib",
+            "crc32c-dev",
+            "cups-dev",
+            "curl-dev",
+            "dav1d-dev",
+            "dbus-glib-dev",
+            "double-conversion-dev",
+            "elfutils",
+            "elfutils-dev",
+            "esbuild",
+            "eudev-dev",
+            "ffmpeg-dev",
+            "findutils",
+            "flac-dev",
+            "flatbuffers-dev",
+            "flex",
+            "freetype-dev",
+            "gn",
+            "go",
+            "gperf",
+            "gtk4.0-dev",
+            "gzip",
+            "harfbuzz-dev",
+            "hunspell-dev",
+            "hwdata-dev",
+            "jpeg-dev",
+            "jsoncpp-dev",
+            "krb5-dev",
+            "lcms2-dev",
+            "libbsd-dev",
+            "libcap-dev",
+            "libevdev-dev",
+            "libexif-dev",
+            "libffi-dev",
+            "libgcrypt-dev",
+            "libjpeg-turbo-dev",
+            "libusb-dev",
+            "libva-dev",
+            "libwebp-dev",
+            "libxcomposite-dev",
+            "libxcursor-dev",
+            "libxinerama-dev",
+            "libxml2-dev",
+            "libxrandr-dev",
+            "libxscrnsaver-dev",
+            "libxslt-dev",
+            "linux-headers",
+            "lld22",
+            "llvm22",
+            "mesa-dev",
+            "minizip-dev",
+            "mold",
+            "nodejs",
+            "nss-dev",
+            "openh264-dev",
+            "opus-dev",
+            "pciutils-dev",
+            "perl",
+            "pipewire-dev",
+            "pulseaudio-dev",
+            "py3-setuptools",
+            "python3",
+            "qt6-qtbase-dev",
+            "re2-dev",
+            "rust-bindgen",
+            "chromium-rust-src",
+            "chromium-rustc-dev",
+            "chromium-rustfmt",
+            "samurai",
+            "simdutf-dev",
+            "snappy-dev",
+            "speex-dev",
+            "spirv-tools-dev",
+            "sqlite-dev",
+            "typescript-go",
+            "woff2-dev",
+            "xcb-proto",
+            "zlib-dev",
+            "zstd-dev"
+          ]
+          MAKEDEPENDS_json
+          cat > build-state/scripts/build.py <<'BUILD_DRIVER_PY'
+          #!/usr/bin/env python3
+          """Native Alpine build driver for the isolated Chromium maintenance workflow."""
+          import base64
+          import concurrent.futures
+          import datetime
+          import difflib
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import selectors
+          import shlex
+          import shutil
+          import signal
+          import stat
+          import subprocess
+          import sys
+          import tarfile
+          import time
+
+          ROOT = Path('/build')
+          OUT = Path('/artifacts')
+          VERSION = '158.0.8127.36-r0'
+          APORTS = '2116874b4e60aff6f0793aeecf4cf3d1b66fa2a6'
+          ORIGINAL = '5affab4174bdf342b97b5fe5e87ec7dc6c29ca1644d18f08fca845bc5cf30ee6'
+          PRIVATE = Path('/run/maintenance-signing/chromium158-maintenance.rsa')
+          COMMIT = os.environ['ABUILD_LAST_COMMIT']
+          assert re.fullmatch(r'[0-9a-f]{40}', COMMIT)
+          for directory in ('evidence', 'logs', 'recipe/upstream', 'recipe/build', 'keys', 'packages'):
+              (OUT / directory).mkdir(parents=True, exist_ok=True)
+          for directory in ('rawlogs', 'sourcecache', 'recipe/upstream', 'recipe/chromium', 'packages'):
+              (ROOT / directory).mkdir(parents=True, exist_ok=True)
+
+          def sha(path, algorithm='sha256'):
+              with Path(path).open('rb') as stream:
+                  return hashlib.file_digest(stream, algorithm).hexdigest()
+
+          def write_json(path, value):
+              temporary = Path(str(path) + '.tmp')
+              temporary.write_text(json.dumps(value, sort_keys=True, indent=2) + '\n')
+              temporary.replace(path)
+
+          def now():
+              return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+          def secrets_to_remove():
+              path = ROOT / 'recipe/upstream/google-api.keys'
+              if not path.exists():
+                  return []
+              encoded = path.read_text().strip()
+              decoded = base64.b64decode(encoded).decode()
+              values = [encoded, decoded.strip()]
+              for word in shlex.split(decoded, comments=True):
+                  if word.startswith('_google_') and '=' in word:
+                      value = word.split('=', 1)[1]
+                      if len(value) >= 8:
+                          values.append(value)
+              return sorted(set(values), key=len, reverse=True)
+
+          def sanitize(text):
+              for value in secrets_to_remove():
+                  text = text.replace(value, '[REDACTED_DISTRIBUTOR_CONFIG]')
+              return text
+
+          def export_log(name):
+              path = ROOT / 'rawlogs' / (name + '.log')
+              if not path.exists():
+                  return
+              raw = path.read_text(errors='replace')
+              safe = sanitize(raw)
+              target = OUT / 'logs' / path.name
+              target.write_text(safe)
+              write_json(OUT / 'evidence' / (name + '-log-identity.json'), {
+                  'original_bytes': path.stat().st_size, 'original_sha256': sha(path),
+                  'exported_bytes': target.stat().st_size, 'exported_sha256': sha(target),
+                  'distributor_configuration_redacted': safe != raw,
+              })
+
+          def run(name, arguments, *, cwd=None, timeout=1800, environment=None):
+              """Keep complete raw logs locally, export sanitized logs, and record every rc."""
+              raw_path = ROOT / 'rawlogs' / (name + '.log')
+              started = time.monotonic()
+              record = {'name': name, 'started_utc': now(), 'arguments': arguments,
+                        'workflow_commit': COMMIT, 'aports_commit': APORTS, 'status': 'RUNNING'}
+              receipt = OUT / 'evidence' / ('stage-' + name + '.json')
+              write_json(receipt, record)
+              print(json.dumps({'stage': name, 'status': 'RUNNING'}), flush=True)
+              process = subprocess.Popen(arguments, cwd=cwd, env=environment, stdout=subprocess.PIPE,
+                                         stderr=subprocess.STDOUT, start_new_session=True)
+              selector = selectors.DefaultSelector()
+              selector.register(process.stdout, selectors.EVENT_READ)
+              heartbeat = started
+              interrupted = False
+              progress_buffer = b''
+              last_ninja_progress = None
+              with raw_path.open('wb') as log:
+                  while selector.get_map():
+                      elapsed = time.monotonic() - started
+                      if elapsed >= timeout and not interrupted:
+                          interrupted = True
+                          os.killpg(process.pid, signal.SIGINT)
+                          record['timeout_seconds'] = timeout
+                      if interrupted and elapsed >= timeout + 60:
+                          try:
+                              os.killpg(process.pid, signal.SIGKILL)
+                          except ProcessLookupError:
+                              pass
+                      for key, _ in selector.select(timeout=1):
+                          data = os.read(key.fileobj.fileno(), 65536)
+                          if data:
+                              log.write(data)
+                              log.flush()
+                              progress_buffer += data
+                              lines = progress_buffer.split(b'\n')
+                              progress_buffer = lines.pop()[-8192:]
+                              for line in lines:
+                                  if re.fullmatch(rb'\[\d+/\d+\] (?:CXX|CC|AR|RUST|LINK|SOLINK) [A-Za-z0-9_./:+@%=-]+(?: [A-Za-z0-9_./:+@%=-]+)?\r?', line):
+                                      last_ninja_progress = line.decode('ascii').strip()[:400]
+                          else:
+                              selector.unregister(key.fileobj)
+                      if time.monotonic() - heartbeat >= 60:
+                          print(json.dumps({'stage': name, 'elapsed_seconds': int(elapsed),
+                                            'raw_log_bytes': log.tell(),
+                                            'last_ninja_progress': sanitize(last_ninja_progress) if last_ninja_progress else None,
+                                            'workspace_available_bytes': shutil.disk_usage(ROOT).free}), flush=True)
+                          heartbeat = time.monotonic()
+              selector.close()
+              code = process.wait()
+              record.update(status='DONE' if code == 0 and not interrupted else 'FAILED',
+                            exit_code=code, controlled_timeout=interrupted, finished_utc=now(),
+                            elapsed_seconds=round(time.monotonic() - started, 3))
+              write_json(receipt, record)
+              export_log(name)
+              print(json.dumps(record), flush=True)
+              if code != 0 or interrupted:
+                  raise RuntimeError('stage_failed:' + name)
+
+          def verify_inputs():
+              recipes = json.loads((ROOT / 'inputs/RECIPE-GIT-BLOBS.json').read_text())
+              sources = json.loads((ROOT / 'inputs/SOURCE-MANIFEST.json').read_text())
+              assert len(recipes) == 23 and len(sources) == 26
+              for item in recipes:
+                  path = ROOT / 'recipe/upstream' / item['name']
+                  assert path.is_file() and not path.is_symlink()
+                  content = path.read_bytes()
+                  blob = hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
+                  assert blob == item['sha'] and len(content) == item['size'], item['name']
+              assert sha(ROOT / 'recipe/upstream/APKBUILD') == ORIGINAL
+              for item in sources:
+                  assert sha(ROOT / 'sourcecache' / item['name'], 'sha512') == item['sha512'], item['name']
+              return recipes, sources
+
+          def bootstrap():
+              assert os.geteuid() == 0
+              assert subprocess.check_output(['apk', '--print-arch'], text=True).strip() == 'aarch64'
+              assert Path('/etc/alpine-release').read_text().strip() == '3.24.4'
+              repos = Path('/etc/apk/repositories')
+              assert sha(repos) == '7b8b3e6fe030eeb4ee7619b42c9419aa846bff1c632442d3f00ed9fb97c6fa36'
+              recipes = json.loads((ROOT / 'inputs/RECIPE-GIT-BLOBS.json').read_text())
+              sources = json.loads((ROOT / 'inputs/SOURCE-MANIFEST.json').read_text())
+              for item in recipes:
+                  name = item['name']
+                  assert '/' not in name and name != '..'
+                  expected_url = 'https://raw.githubusercontent.com/alpinelinux/aports/' + APORTS + '/community/chromium/' + name
+                  assert item['url'] == expected_url
+                  target = ROOT / 'recipe/upstream' / name
+                  run('recipe-' + name, ['curl', '--fail', '--silent', '--show-error', '--location', '--retry', '3',
+                      '--connect-timeout', '20', '--max-time', '180', '--output', str(target), expected_url], timeout=240)
+                  content = target.read_bytes()
+                  assert hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest() == item['sha'], name
+                  assert len(content) == item['size'], name
+                  shutil.copyfile(target, ROOT / 'recipe/chromium' / name)
+              assert sha(ROOT / 'recipe/upstream/APKBUILD') == ORIGINAL
+              deps = json.loads((ROOT / 'inputs/MAKEDEPENDS.json').read_text())
+              derived = subprocess.check_output(['/bin/sh', '-c', 'CARCH=aarch64; . /build/recipe/upstream/APKBUILD; printf "%s\\n" $makedepends'], text=True).splitlines()
+              assert derived == deps and len(deps) == 88
+              run('dependencies', ['apk', 'add', '--no-cache', '--virtual', '.chromium158-builddeps'] +
+                  deps + ['alpine-sdk', 'xvfb-run', 'ccache', 'python3', 'curl'], timeout=1800)
+              assert sha(repos) == '7b8b3e6fe030eeb4ee7619b42c9419aa846bff1c632442d3f00ed9fb97c6fa36'
+              shutil.copyfile(repos, OUT / 'evidence/repositories.txt')
+              shutil.copyfile('/lib/apk/db/installed', OUT / 'evidence/installed-packages.db')
+              shutil.copyfile('/etc/apk/world', OUT / 'evidence/world.txt')
+              def download(item):
+                  path = ROOT / 'sourcecache' / item['name']
+                  if item['url']:
+                      partial = Path(str(path) + '.part')
+                      run('download-' + item['name'], ['curl', '--fail', '--location', '--retry', '3',
+                          '--connect-timeout', '20', '--max-time', '1800', '--continue-at', '-',
+                          '--output', str(partial), item['url']], timeout=1900)
+                      assert sha(partial, 'sha512') == item['sha512'], item['name']
+                      partial.replace(path)
+                  else:
+                      shutil.copyfile(ROOT / 'recipe/upstream' / item['name'], path)
+                  assert sha(path, 'sha512') == item['sha512'], item['name']
+                  return {'name': item['name'], 'url': item['url'], 'bytes': path.stat().st_size,
+                          'sha512': item['sha512'], 'sha256': sha(path)}
+              with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                  verified = list(pool.map(download, sources))
+              verify_inputs()
+              write_json(OUT / 'evidence/sources-verified.json', {'count': len(verified), 'sources': verified})
+              original = (ROOT / 'recipe/upstream/APKBUILD').read_text()
+              needle = '\tninja -C out/bld \\\n'
+              assert original.count(needle) == 1
+              adapted = original.replace(needle, '\tninja -j4 -C out/bld \\\n')
+              (ROOT / 'recipe/chromium/APKBUILD').write_text(adapted)
+              package_identity = []
+              for paragraph in Path('/lib/apk/db/installed').read_text().split('\n\n'):
+                  fields = dict(line.split(':', 1) for line in paragraph.splitlines() if ':' in line)
+                  if fields.get('P') and fields['P'] != '.chromium158-builddeps':
+                      package_identity.append({key: fields.get(key, '') for key in ('P', 'V', 'A', 'C')})
+              package_identity.sort(key=lambda item: item['P'])
+              cache_contract = {'aports_commit': APORTS, 'upstream_recipe_sha256': ORIGINAL,
+                  'active_recipe_sha256': sha(ROOT / 'recipe/chromium/APKBUILD'),
+                  'package_identity_P_V_A_C': package_identity,
+                  'compiler_settings': {'ninja_jobs': 4, 'cargo_jobs': 4, 'go_jobs': 4,
+                      'USE_CCACHE': '1', 'CCACHE_COMPILERCHECK': 'content', 'CCACHE_BASEDIR': '/build'}}
+              normalized = json.dumps(cache_contract, sort_keys=True, separators=(',', ':')).encode()
+              cache_fingerprint = hashlib.sha256(normalized).hexdigest()
+              write_json(OUT / 'evidence/cache-identity.json', {'fingerprint': cache_fingerprint,
+                  'normalized_contract': cache_contract, 'excluded_task_virtual_package': '.chromium158-builddeps'})
+              (OUT / 'evidence/cache-fingerprint.txt').write_text(cache_fingerprint + '\n')
+              (OUT / 'recipe/concurrency.patch').write_text(''.join(difflib.unified_diff(
+                  original.splitlines(True), adapted.splitlines(True), fromfile='upstream/APKBUILD', tofile='build/APKBUILD')))
+              for item in recipes:
+                  if item['name'] == 'google-api.keys':
+                      continue
+                  shutil.copyfile(ROOT / 'recipe/upstream' / item['name'], OUT / 'recipe/upstream' / item['name'])
+                  shutil.copyfile(ROOT / 'recipe/chromium' / item['name'], OUT / 'recipe/build' / item['name'])
+              for name in ('RECIPE-GIT-BLOBS.json', 'SOURCE-MANIFEST.json', 'MAKEDEPENDS.json'):
+                  shutil.copyfile(ROOT / 'inputs' / name, OUT / 'evidence' / name)
+              shutil.copyfile(__file__, OUT / 'evidence/build-driver.py')
+              write_json(OUT / 'evidence/input-contract.json', {
+                  'aports_commit': APORTS, 'workflow_commit': COMMIT,
+                  'upstream_apkbuild_sha256': ORIGINAL, 'active_apkbuild_sha256': sha(ROOT / 'recipe/chromium/APKBUILD'),
+                  'recipe_files_verified': 23, 'source_files_sha512_verified': 26,
+                  'only_recipe_delta': 'ninja -j4; official features, check targets and package splits retained',
+                  'distributor_api_configuration_exported': False,
+                  'external_source_archives': 'Verified against pinned official recipe; originals remain at recorded upstream URLs and on the tablet.',
+              })
+              run('create-builder', ['adduser', '-D', '-u', '1000', '-G', 'abuild', '-h', '/home/builder', 'builder'], timeout=30)
+              run('workspace-ownership', ['chown', '-R', '1000:1000', '/build', '/artifacts', '/ccache', '/run/maintenance-signing'], timeout=120)
+              print(json.dumps({'bootstrap': 'VERIFIED', 'source_count': 26, 'recipe_count': 23}), flush=True)
+
+          def environment():
+              values = dict(os.environ, HOME='/home/builder', APKBUILD='/build/recipe/chromium/APKBUILD',
+                  SRCDEST='/build/sourcecache', REPODEST='/build/packages', JOBS='4', MAKEFLAGS='-j4',
+                  CARGO_BUILD_JOBS='4', GOMAXPROCS='4', SAMUFLAGS='-j4', CMAKE_BUILD_PARALLEL_LEVEL='4',
+                  SOURCE_DATE_EPOCH='1795181522', PACKAGER='Isolated Alpine maintenance build <local@localhost>',
+                  PACKAGER_PRIVKEY=str(PRIVATE), USE_CCACHE='1', CCACHE_DIR='/ccache',
+                  CCACHE_BASEDIR='/build', CCACHE_COMPILERCHECK='content', CCACHE_MAXSIZE='5G',
+                  XDG_CONFIG_HOME='/build/verification-config', XDG_CACHE_HOME='/build/verification-cache')
+              if os.environ.get('CACHE_RESTORED') == 'true':
+                  values['CCACHE_READONLY'] = 'true'
+              else:
+                  values.pop('CCACHE_READONLY', None)
+              return values
+
+          def package_check():
+              keys = OUT / 'keys'
+              public = keys / (PRIVATE.name + '.pub')
+              records = []
+              for path in sorted((ROOT / 'packages').rglob('*.apk')):
+                  result = subprocess.run(['apk', '--keys-dir', str(keys), 'verify', str(path)], capture_output=True, text=True, timeout=180)
+                  assert result.returncode == 0, path.name
+                  metadata, signatures = {}, []
+                  with tarfile.open(path, mode='r|gz', ignore_zeros=True) as archive:
+                      for member in archive:
+                          name = member.name.removeprefix('./')
+                          if name.startswith('.SIGN.'):
+                              signatures.append(name)
+                          if name == '.PKGINFO':
+                              assert member.isfile(), 'Package metadata must be a regular file'
+                              for line in archive.extractfile(member).read().decode().splitlines():
+                                  if ' = ' in line and not line.startswith('#'):
+                                      key, value = line.split(' = ', 1)
+                                      metadata.setdefault(key, []).append(value)
+                              break
+                  name = metadata['pkgname'][0]
+                  assert re.fullmatch(r'chromium(?:-[a-z0-9-]+)?', name)
+                  assert metadata['pkgver'] == [VERSION] and metadata['arch'] in [['aarch64'], ['noarch']]
+                  if name in ('chromium', 'chromium-angle'):
+                      assert metadata['arch'] == ['aarch64']
+                  assert metadata['commit'] == [COMMIT]
+                  assert path.name == name + '-' + VERSION + '.apk'
+                  assert len(signatures) == 1 and signatures[0] in ['.SIGN.RSA.' + public.name, '.SIGN.RSA256.' + public.name]
+                  destination = OUT / 'packages' / path.name
+                  shutil.copyfile(path, destination)
+                  records.append({'name': name, 'version': VERSION, 'bytes': path.stat().st_size,
+                      'sha256': sha(path), 'apk_signature_verified': True, 'metadata': metadata, 'signatures': signatures})
+              assert {'chromium', 'chromium-common', 'chromium-angle'}.issubset({x['name'] for x in records})
+              for index in sorted((ROOT / 'packages').rglob('APKINDEX.tar.gz')):
+                  shutil.copyfile(index, OUT / 'packages/APKINDEX.tar.gz')
+              write_json(OUT / 'evidence/packages-verified.json', {'status': 'VERIFIED', 'packages': records,
+                  'workflow_commit': COMMIT, 'public_key_sha256': sha(public), 'target_device_installed': False})
+
+          def build():
+              assert os.geteuid() == 1000
+              verify_inputs()
+              contract = json.loads((OUT / 'evidence/input-contract.json').read_text())
+              assert sha(ROOT / 'recipe/chromium/APKBUILD') == contract['active_apkbuild_sha256']
+              env = environment()
+              write_json(OUT / 'evidence/cache-policy.json', {'max_size_decimal_bytes': 5000000000,
+                  'exact_snapshot_restored': os.environ.get('CACHE_RESTORED') == 'true',
+                  'read_only_on_exact_restore': os.environ.get('CACHE_RESTORED') == 'true',
+                  'cache_scope': 'C/C++ compiler outputs; Rust builds, Ninja graph and final links are not resumed by this cache',
+                  'save_policy': 'First failed-build snapshot only, fixed maintenance/source/compiler/stage key',
+                  'automatic_repository_cache_deletion': False})
+              # The host sets this once at job start; preserve 25 minutes for cleanup/cache/upload.
+              deadline = int(os.environ['BUILD_DEADLINE_EPOCH'])
+              commands = {'prepare': ['validate', 'unpack', 'prepare'], 'build': ['build'],
+                          'check': ['check'], 'package': ['rootpkg', 'index']}
+              for stage, actions in commands.items():
+                  remaining = deadline - time.time()
+                  assert remaining > 120, 'insufficient_time_before_' + stage
+                  if stage == 'package':
+                      assert all(json.loads((OUT / 'evidence' / ('stage-' + prior + '.json')).read_text())['status'] == 'DONE'
+                                 for prior in ('prepare', 'build', 'check'))
+                      PRIVATE.parent.chmod(0o700)
+                      old_umask = os.umask(0o077)
+                      try:
+                          subprocess.run(['openssl', 'genrsa', '-out', str(PRIVATE), '4096'], check=True, capture_output=True)
+                          subprocess.run(['openssl', 'rsa', '-in', str(PRIVATE), '-pubout', '-out', str(PRIVATE) + '.pub'], check=True, capture_output=True)
+                      finally:
+                          os.umask(old_umask)
+                      public = Path(str(PRIVATE) + '.pub')
+                      shutil.copyfile(public, OUT / 'keys' / public.name)
+                      (OUT / 'keys' / public.name).chmod(0o644)
+                      write_json(OUT / 'evidence/signing.json', {'public_key_name': public.name,
+                          'public_key_sha256': sha(public), 'private_key_exported': False,
+                          'global_trust_modified': False, 'private_key_location': 'ephemeral_container_tmpfs'})
+                  run(stage, ['abuild', '-K', '-m', '-P', '/build/packages', '-s', '/build/sourcecache'] + actions,
+                      cwd='/build/recipe/chromium', timeout=int(remaining), environment=env)
+              package_check()
+              binary = ROOT / 'recipe/chromium/src/chromium-158.0.8127.36/out/bld/chrome'
+              run('compiled-version', [str(binary), '--version'], environment=env, timeout=60)
+              run('compiled-elf', ['readelf', '-h', str(binary)], environment=env, timeout=60)
+              assert 'Chromium 158.0.8127.36' in (OUT / 'logs/compiled-version.log').read_text()
+              assert re.search(r'Machine:\s+AArch64', (OUT / 'logs/compiled-elf.log').read_text())
+              write_json(OUT / 'evidence/final-result.json', {'status': 'BUILT_CHECKED_SIGNED_VERIFIED',
+                  'workflow_commit': COMMIT, 'aports_commit': APORTS, 'package_version': VERSION,
+                  'original_check_function_completed': True, 'device_installed': False, 'completed_utc': now()})
+
+          def finalize():
+              for path in (ROOT / 'rawlogs').glob('*.log'):
+                  export_log(path.stem)
+              if PRIVATE.exists():
+                  PRIVATE.unlink()
+              public = Path(str(PRIVATE) + '.pub')
+              if public.exists():
+                  public.unlink()
+              assert not PRIVATE.exists()
+              run('ccache-stats', ['ccache', '--show-stats'], environment=environment(), timeout=60)
+              # Explicitly enumerate output files; the source tree, args.gn and signing tmpfs are outside this export.
+              manifest = []
+              for path in sorted(OUT.rglob('*')):
+                  if path.is_file() and path.name != 'MANIFEST.json':
+                      assert not path.is_symlink() and stat.S_ISREG(path.stat().st_mode)
+                      assert path.name not in ('google-api.keys', 'args.gn', PRIVATE.name)
+                      if path.suffix in ('.json', '.log', '.txt', '.py', '.patch', '.sh', '.pub') or path.name == 'APKBUILD':
+                          data = path.read_text(errors='replace')
+                          assert not re.search(r'^-----BEGIN (?:RSA )?PRIVATE KEY-----\r?$', data, re.MULTILINE)
+                          for secret in secrets_to_remove():
+                              assert secret not in data
+                      manifest.append({'path': str(path.relative_to(OUT)), 'bytes': path.stat().st_size, 'sha256': sha(path)})
+              write_json(OUT / 'MANIFEST.json', {'files': manifest, 'private_key_absent': True,
+                  'distributor_configuration_not_exported': True, 'workflow_commit': COMMIT})
+
+          if __name__ == '__main__':
+              mode = sys.argv[1]
+              if mode == 'bootstrap':
+                  bootstrap()
+              elif mode == 'build':
+                  try:
+                      build()
+                  except BaseException as error:
+                      write_json(OUT / 'evidence/driver-failure.json', {'status': 'FAILED', 'type': type(error).__name__,
+                          'message': sanitize(str(error)), 'time_utc': now(), 'workflow_commit': COMMIT})
+                      raise
+                  finally:
+                      finalize()
+              elif mode == 'finalize':
+                  finalize()
+              else:
+                  raise SystemExit('unsupported_mode')
+          BUILD_DRIVER_PY
+          sha256sum build-state/scripts/build.py build-state/inputs/*.json > delivery/evidence/embedded-inputs.sha256
+
+      - name: Bootstrap the pinned stable Alpine container
+        id: bootstrap
+        timeout-minutes: 50
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull --platform linux/arm64 "$ALPINE_IMAGE" > delivery/logs/image-pull.log 2>&1
           test "$(docker image inspect "$ALPINE_IMAGE" --format '{{.Id}}')" = "$ALPINE_IMAGE_ID"
           test "$(docker image inspect "$ALPINE_IMAGE" --format '{{.Architecture}} {{.Os}}')" = 'arm64 linux'
-          docker run --detach --name "$PROBE_CONTAINER" --platform linux/arm64 \
-            "$ALPINE_IMAGE" /bin/sh -c 'while :; do sleep 3600; done' > diagnostic/container-id.txt
-          test "$(docker inspect "$PROBE_CONTAINER" --format '{{.State.Running}}')" = true
-          docker inspect "$PROBE_CONTAINER" --format '{{json .Config.Image}}' > diagnostic/container-image.json
-
-      - name: Free selected optional SDK caches only if the measured disk needs it
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$RUNNER_ENVIRONMENT" = github-hosted
-          test "$(docker inspect "$PROBE_CONTAINER" --format '{{.State.Running}}')" = true
-          : > diagnostic/ephemeral-cleanup.jsonl
-          # This is a disposable hosted VM. Preserve Docker/containerd state,
-          # the Actions runtime, system Python, and all device/user data.
-          # Stop deleting as soon as the required workspace space is available.
+          docker image inspect "$ALPINE_IMAGE" | jq 'map({Id,RepoDigests,Architecture,Os,Size})' > delivery/evidence/image-identity.json
+          docker run --detach --name "$BUILD_CONTAINER" --platform linux/arm64 --shm-size=1g \
+            --mount type=bind,source="$GITHUB_WORKSPACE/build-state",target=/build \
+            --mount type=bind,source="$GITHUB_WORKSPACE/build-state/ccache",target=/ccache \
+            --mount type=bind,source="$GITHUB_WORKSPACE/delivery",target=/artifacts \
+            --tmpfs /run/maintenance-signing:rw,noexec,nosuid,size=1m,mode=0700 \
+            --env ABUILD_LAST_COMMIT="$GITHUB_SHA" --env BUILD_DEADLINE_EPOCH="$BUILD_DEADLINE_EPOCH" \
+            "$ALPINE_IMAGE" /bin/sh -c 'while :; do sleep 3600; done' > delivery/evidence/container-id.txt
+          # Reuse the preflight's exact optional SDK scope. Do not touch Docker/containerd state.
+          : > delivery/evidence/ephemeral-cleanup.jsonl
           for candidate in /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache /opt/az; do
             available=$(df -B1 --output=avail "$GITHUB_WORKSPACE" | tail -n 1 | tr -d ' ')
-            if (( available >= MINIMUM_FREE_BYTES )); then
-              break
-            fi
-            if [[ ! -d "$candidate" || -L "$candidate" ]] || mountpoint -q "$candidate"; then
-              jq -nc --arg path "$candidate" '{path:$path,action:"skipped_missing_symlink_or_mount"}' >> diagnostic/ephemeral-cleanup.jsonl
-              continue
-            fi
+            if (( available >= MINIMUM_FREE_BYTES )); then break; fi
+            if [[ ! -d "$candidate" || -L "$candidate" ]] || mountpoint -q "$candidate"; then continue; fi
             test "$(realpath -e -- "$candidate")" = "$candidate"
             before_kib=$(sudo du -sk -- "$candidate" | awk '{print $1}')
             sudo rm -rf --one-file-system -- "$candidate"
             test ! -e "$candidate"
-            after_available=$(df -B1 --output=avail "$GITHUB_WORKSPACE" | tail -n 1 | tr -d ' ')
-            jq -nc --arg path "$candidate" --argjson kib "$before_kib" \
-              --argjson before "$available" --argjson after "$after_available" \
-              '{path:$path,action:"removed_optional_preinstalled_tool",before_du_kib:$kib,workspace_available_before:$before,workspace_available_after:$after}' >> diagnostic/ephemeral-cleanup.jsonl
+            jq -nc --arg path "$candidate" --argjson kib "$before_kib" '{path:$path,before_du_kib:$kib,removed:true}' >> delivery/evidence/ephemeral-cleanup.jsonl
           done
-          test "$(docker inspect "$PROBE_CONTAINER" --format '{{.State.Running}}')" = true
-          docker exec "$PROBE_CONTAINER" /bin/sh -c 'test "$(uname -m)" = aarch64; test "$(cat /etc/alpine-release)" = 3.24.4' > diagnostic/container-after-cleanup.txt 2>&1
+          available=$(df -B1 --output=avail "$GITHUB_WORKSPACE" | tail -n 1 | tr -d ' ')
+          test "$available" -ge "$MINIMUM_FREE_BYTES"
+          docker exec "$BUILD_CONTAINER" /bin/sh -c 'set -eu; test "$(uname -m)" = aarch64; test "$(apk --print-arch)" = aarch64; test "$(cat /etc/alpine-release)" = 3.24.4; apk add --no-cache python3 curl ccache alpine-sdk' > delivery/logs/bootstrap-tools.log 2>&1
+          docker exec "$BUILD_CONTAINER" python3 /build/scripts/build.py bootstrap
+          fingerprint=$(cat delivery/evidence/cache-fingerprint.txt)
+          test "${#fingerprint}" -eq 64
+          printf 'cache_fingerprint=%s\n' "$fingerprint" >> "$GITHUB_OUTPUT"
+          printf 'ready=true\n' >> "$GITHUB_OUTPUT"
 
-      - name: Verify the stable Alpine channel and native abuild toolchain
+      - name: Restore only the matching native compiler cache
+        id: compiler-cache
+        continue-on-error: true
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build-state/ccache
+          key: maintenance-20261121-alpine-chromium158-aarch64-compile-${{ steps.bootstrap.outputs.cache_fingerprint }}
+
+      - name: Run original preparation, build, checks and signed packaging
+        id: native-build
         shell: bash
         run: |
           set -euo pipefail
-          cat > diagnostic/alpine-native-probe.sh <<'ALPINE_PROBE'
-          #!/bin/sh
-          set -eu
-          test "$(uname -m)" = aarch64
-          test "$(apk --print-arch)" = aarch64
-          test "$(cat /etc/alpine-release)" = 3.24.4
-          printf 'alpine_release='; cat /etc/alpine-release
-          printf 'kernel_arch='; uname -m
-          printf 'apk_arch='; apk --print-arch
-          cat /etc/apk/repositories
-          awk 'NF && $1 !~ /^#/ && $1 !~ /^https?:\/\/dl-cdn.alpinelinux.org\/alpine\/v3\.24\/(main|community)$/ { bad=1 } END { exit bad }' /etc/apk/repositories
-          sha256sum /etc/apk/repositories
-          apk update
-          apk policy abuild build-base
-          apk add --no-cache abuild build-base
-          command -v abuild
-          abuild -V
-          apk info -W /usr/bin/abuild
-          cc --version
-          cc -dumpmachine
-          mkdir -p /tmp/alpine-native-probe
-          printf '#include <stdio.h>\nint main(void) { puts("alpine-aarch64-native-toolchain-ok"); return 0; }\n' > /tmp/alpine-native-probe/probe.c
-          cc -O2 /tmp/alpine-native-probe/probe.c -o /tmp/alpine-native-probe/probe
-          readelf -h /tmp/alpine-native-probe/probe
-          /tmp/alpine-native-probe/probe
-          sha256sum /tmp/alpine-native-probe/probe
-          apk info -v | sort
-          printf '\nALPINE_NATIVE_PROBE_PASS\n'
-          ALPINE_PROBE
-          docker exec -i "$PROBE_CONTAINER" /bin/sh -s < diagnostic/alpine-native-probe.sh > diagnostic/alpine-native-toolchain.txt 2>&1
-          tail -n 1 diagnostic/alpine-native-toolchain.txt | grep -Fx ALPINE_NATIVE_PROBE_PASS
+          docker exec "$BUILD_CONTAINER" chown -R 1000:1000 /ccache
+          # Native Alpine, normal build user. The internal deadline leaves time for evidence and cache export.
+          docker exec --user 1000:1000 --env HOME=/home/builder --env CACHE_RESTORED='${{ steps.compiler-cache.outputs.cache-hit }}' "$BUILD_CONTAINER" python3 /build/scripts/build.py build
+          test -s delivery/evidence/packages-verified.json
+          test -s delivery/evidence/final-result.json
 
-      - name: Apply the measured 100 GB workspace guard
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            date -u +%FT%TZ
-            printf 'cpu_count='; nproc
-            awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/ { print }' /proc/meminfo
-            df -B1 --output=source,size,used,avail,target / "$GITHUB_WORKSPACE"
-          } > diagnostic/host-after.txt
-          lsblk -b -J -o NAME,PATH,SIZE,TYPE,FSTYPE,MOUNTPOINTS,PKNAME,RO > diagnostic/lsblk-after.json
-          findmnt --json -o TARGET,SOURCE,FSTYPE,OPTIONS > diagnostic/findmnt-after.json
-          for target in / /mnt "$GITHUB_WORKSPACE" "$RUNNER_TEMP"; do
-            if test -e "$target"; then
-              device=$(stat -L -c '%d' "$target")
-              read -r block_size total_blocks available_blocks < <(stat -L -f -c '%S %b %a' "$target")
-              jq -nc --arg path "$target" --argjson device "$device" --argjson unit "$block_size" --argjson total "$total_blocks" --argjson available "$available_blocks" \
-                '{path:$path,exists:true,device_id:$device,total_bytes:($unit*$total),available_bytes:($unit*$available)}'
-            else
-              jq -nc --arg path "$target" '{path:$path,exists:false}'
-            fi
-          done | jq -s '{filesystem_records:.,measurement:"GNU stat filesystem counters; device IDs are not additive",volumes_created_or_reconfigured:false}' > diagnostic/work-volumes.json
-          disk_available=$(df -B1 --output=avail "$GITHUB_WORKSPACE" | tail -n 1 | tr -d ' ')
-          memory_total=$(awk '/^MemTotal:/ { printf "%.0f", $2 * 1024 }' /proc/meminfo)
-          memory_available=$(awk '/^MemAvailable:/ { printf "%.0f", $2 * 1024 }' /proc/meminfo)
-          swap_total=$(awk '/^SwapTotal:/ { printf "%.0f", $2 * 1024 }' /proc/meminfo)
-          cpu_count=$(nproc)
-          jq -n --arg image "$ALPINE_IMAGE" --argjson disk "$disk_available" \
-            --argjson memory "$memory_total" --argjson available_memory "$memory_available" \
-            --argjson swap "$swap_total" --argjson cpu "$cpu_count" --argjson minimum "$MINIMUM_FREE_BYTES" \
-            '{alpine_image:$image,host_arch:"aarch64",container_arch:"aarch64",alpine_release:"3.24.4",abuild_installed_and_executed:true,native_c_compile_and_execution:true,workspace_available_bytes:$disk,memory_total_bytes:$memory,memory_available_bytes:$available_memory,swap_total_bytes:$swap,cpu_count:$cpu,minimum_workspace_bytes:$minimum,minimum_memory_bytes:8000000000,disk_guard:($disk >= $minimum),memory_guard:($memory >= 8000000000),environment_guard:($disk >= $minimum and $memory >= 8000000000),full_chromium_build_attempted:false,device_changes:false,repository_checkout:false}' > diagnostic/summary.json
-          cat diagnostic/summary.json
-          jq -e '.environment_guard' diagnostic/summary.json
-
-      - name: Remove only the job's diagnostic container
+      - name: Preserve logs and destroy the ephemeral signing key
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p diagnostic
-          if docker container inspect "$PROBE_CONTAINER" >/dev/null 2>&1; then
-            docker inspect "$PROBE_CONTAINER" --format '{{json .State}}' > diagnostic/container-state-before-removal.json
-            docker rm --force "$PROBE_CONTAINER" > diagnostic/container-removal.txt
-            if docker container inspect "$PROBE_CONTAINER" >/dev/null 2>&1; then
-              exit 1
+          finalize_rc=0
+          removal_rc=0
+          if docker inspect "$BUILD_CONTAINER" >/dev/null 2>&1; then
+            if docker exec "$BUILD_CONTAINER" test -x /usr/bin/python3; then
+              docker exec "$BUILD_CONTAINER" python3 /build/scripts/build.py finalize || finalize_rc=$?
             fi
+            docker exec "$BUILD_CONTAINER" /bin/sh -c 'rm -f /run/maintenance-signing/chromium158-maintenance.rsa /run/maintenance-signing/chromium158-maintenance.rsa.pub; test ! -e /run/maintenance-signing/chromium158-maintenance.rsa' || removal_rc=$?
+            docker inspect "$BUILD_CONTAINER" --format '{{json .State}}' > delivery/evidence/container-state-before-removal.json || removal_rc=$?
+            docker rm --force "$BUILD_CONTAINER" > delivery/evidence/container-removal.txt || removal_rc=$?
+            if docker inspect "$BUILD_CONTAINER" >/dev/null 2>&1; then removal_rc=1; fi
           fi
+          if (( finalize_rc != 0 )); then
+            # A failed export check must not publish the unverified output directory.
+            mv delivery blocked-delivery
+            mkdir -p delivery/evidence
+            jq -n --argjson code "$finalize_rc" '{status:"EXPORT_VALIDATION_FAILED",exit_code:$code,unverified_output_quarantined:true}' > delivery/evidence/export-failure.json
+          fi
+          df -B1 --output=source,size,used,avail,target / "$GITHUB_WORKSPACE" > delivery/evidence/host-final-space.txt
+          find delivery -type f ! -name CHECKSUMS.sha256 -print0 | sort -z | xargs -0 sha256sum > delivery/CHECKSUMS.sha256
+          test "$finalize_rc" -eq 0
+          test "$removal_rc" -eq 0
 
-      - name: Preserve the diagnostic receipt even when a guard fails
+      - name: Preserve successful and failed build evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: alpine-chromium158-arm-preflight-${{ github.run_id }}
-          path: diagnostic/
+          name: alpine-chromium158-native-${{ github.run_id }}-${{ github.run_attempt }}
+          path: delivery/
+          compression-level: 0
           if-no-files-found: error
           retention-days: 7
+
+      - name: Save bounded partial compiler work for an informed continuation
+        if: always() && steps.bootstrap.outputs.ready == 'true' && steps.native-build.outcome != 'success' && steps.compiler-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 20
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build-state/ccache
+          key: maintenance-20261121-alpine-chromium158-aarch64-compile-${{ steps.bootstrap.outputs.cache_fingerprint }}
