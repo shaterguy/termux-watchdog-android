@@ -1,0 +1,109 @@
+name: Inspect public Chromium 158 Termux build environment
+
+on:
+  push:
+    branches:
+      - maintenance/20261121-chromium158-builder
+    paths:
+      - .github/workflows/termux-chromium158-maintenance.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chromium158-public-preflight-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    env:
+      PACKAGING_COMMIT: 07f9482c02535417719d7f6398f649d4bc176a1c
+      BUILDER_IMAGE: ghcr.io/termux/package-builder@sha256:e2de051a518d8b188c59c4a1ecf357d373b9ccf48d6c06d7681fdc3f61a77287
+    steps:
+      - name: Record the actual standard runner and pin the public recipe
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostic
+          lsblk -b -J -o NAME,PATH,SIZE,TYPE,FSTYPE,MOUNTPOINTS,PKNAME,RO > diagnostic/lsblk-before.json
+          df -B1 -a > diagnostic/df-all-before.txt
+          findmnt --json -o TARGET,SOURCE,FSTYPE,OPTIONS > diagnostic/findmnt-before.json
+          test "$(uname -m)" = x86_64
+          {
+            date -u +%FT%TZ
+            uname -a
+            printf 'cpu_count='; nproc
+            awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/ { print }' /proc/meminfo
+            df -B1 --output=source,size,used,avail,target /
+            docker version --format '{{.Server.Version}}'
+          } > diagnostic/host-before.txt
+          git init termux-packages
+          git -C termux-packages remote add origin https://github.com/termux/termux-packages.git
+          git -C termux-packages fetch --depth 1 origin "$PACKAGING_COMMIT"
+          git -C termux-packages checkout --detach FETCH_HEAD
+          test "$(git -C termux-packages rev-parse HEAD)" = "$PACKAGING_COMMIT"
+          sha256sum termux-packages/scripts/free-space.sh > diagnostic/free-space-source.sha256
+          sed -n '/^TERMUX_PKG_VERSION=/p; /^TERMUX_PKG_SHA256=/p; /^TERMUX_PKG_ON_DEVICE_BUILD_NOT_SUPPORTED=/p' termux-packages/x11-packages/chromium/build.sh > diagnostic/chromium-recipe.txt
+          sed -n '/^TERMUX_PKG_VERSION=/p; /^TERMUX_PKG_SHA256=/p; /^TERMUX_PKG_ON_DEVICE_BUILD_NOT_SUPPORTED=/p' termux-packages/x11-packages/chromium-host-tools/build.sh > diagnostic/host-tools-recipe.txt
+      - name: Load the same official builder image before freeing ephemeral runner space
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull --platform linux/amd64 "$BUILDER_IMAGE"
+          docker image inspect "$BUILDER_IMAGE" --format '{{json .RepoDigests}}' > diagnostic/builder-digests.json
+          docker image inspect "$BUILDER_IMAGE" --format '{{.Architecture}} {{.Os}} {{.Size}}' > diagnostic/builder-platform.txt
+          # This pinned official script acts only on this disposable Actions VM.
+          # It is never sent to either Termux device.
+          (cd termux-packages && CI=true ./scripts/free-space.sh) > diagnostic/ephemeral-space-cleanup.log 2>&1
+      - name: Measure remaining space and the container toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            date -u +%FT%TZ
+            printf 'cpu_count='; nproc
+            awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/ { print }' /proc/meminfo
+            df -B1 --output=source,size,used,avail,target /
+          } > diagnostic/host-after.txt
+          docker run --rm --platform linux/amd64 --entrypoint /bin/bash "$BUILDER_IMAGE" -lc '
+            set -euo pipefail
+            uname -m
+            command -v python3
+            python3 --version
+            ldd --version
+            python3 -c "import json,os,sys,ctypes; print(json.dumps(dict(python=sys.version,executable=sys.executable,cpu=os.cpu_count(),libc_available=bool(ctypes.CDLL(None)))))"
+            if command -v gn >/dev/null; then gn --version; gn help --script-executable; fi
+          ' > diagnostic/container-toolchain.txt 2>&1
+          lsblk -b -J -o NAME,PATH,SIZE,TYPE,FSTYPE,MOUNTPOINTS,PKNAME,RO > diagnostic/lsblk-after.json
+          df -B1 -a > diagnostic/df-all-after.txt
+          findmnt --json -o TARGET,SOURCE,FSTYPE,OPTIONS > diagnostic/findmnt-after.json
+          python3 - <<'PYV' > diagnostic/work-volumes.json
+          import json,os,pathlib
+          rows=[]
+          for value in dict.fromkeys(['/', '/mnt', os.environ['GITHUB_WORKSPACE'], os.environ['RUNNER_TEMP']]):
+              p=pathlib.Path(value); row={'path':value,'exists':p.exists()}
+              if p.exists():
+                  st=p.stat(); fs=os.statvfs(p)
+                  row.update(device_id=st.st_dev,total_bytes=fs.f_blocks*fs.f_frsize,available_bytes=fs.f_bavail*fs.f_frsize,realpath=str(p.resolve()))
+              rows.append(row)
+          print(json.dumps({'filesystem_records':rows,'volumes_created_or_reconfigured':False},indent=2))
+          PYV
+          disk_available=$(df -B1 --output=avail / | tail -n 1 | tr -d ' ')
+          memory_total=$(awk '/^MemTotal:/ { printf "%.0f", $2 * 1024 }' /proc/meminfo)
+          cpu_count=$(nproc)
+          # These are diagnostic thresholds, not a guarantee that a full build completes.
+          # The official minimum is 100 GB; 100 GiB is recorded separately as headroom.
+          jq -n --argjson disk "$disk_available" --argjson memory "$memory_total" --argjson cpu "$cpu_count" \
+            '{disk_available_bytes:$disk,memory_total_bytes:$memory,cpu_count:$cpu,minimum_disk_bytes:100000000000,recommended_disk_bytes:107374182400,meets_recommended_disk:($disk>=107374182400),minimum_memory_bytes:8000000000,environment_guard:($disk>=100000000000 and $memory>=8000000000 and $cpu>=2),full_build_attempted:false,artifact_installed:false}' > diagnostic/summary.json
+          cat diagnostic/summary.json
+          jq -e '.environment_guard' diagnostic/summary.json
+      - name: Preserve the diagnostic receipt even if a measurement failed
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: chromium158-public-preflight-${{ github.run_id }}
+          path: diagnostic/
+          if-no-files-found: error
+          retention-days: 7
