@@ -1,0 +1,192 @@
+name: Inspect Alpine Chromium 158 ARM64 build resources
+
+on:
+  push:
+    branches:
+      - maintenance/20261121-alpine-chromium158-builder
+    paths:
+      - .github/workflows/alpine-chromium158-maintenance.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: alpine-chromium158-arm-preflight-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    if: github.repository == 'shaterguy/termux-watchdog-android' && github.event_name == 'push' && github.ref == 'refs/heads/maintenance/20261121-alpine-chromium158-builder'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      # Official docker-library/repo-info, repos/alpine/remote/3.24.4.md,
+      # Git blob 93ce4ab619abf4f27dbe54f76244a4edc39d46da.
+      ALPINE_IMAGE: docker.io/library/alpine@sha256:1829893486be257df5049ab3b7fc95afbd0fc09d89803cbc580bda1ba5386b29
+      ALPINE_IMAGE_ID: sha256:abbc135a7d3909a5eb6a56aac4c769cf15be025e3c9e226b8660f2b2b378158b
+      PROBE_CONTAINER: alpine-chromium158-maintenance-probe
+      MINIMUM_FREE_BYTES: '100000000000'
+    steps:
+      - name: Record the actual ephemeral ARM64 runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostic
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(uname -m)" = aarch64
+          for program in docker jq stat df findmnt lsblk realpath mountpoint; do
+            command -v "$program"
+          done > diagnostic/host-command-paths.txt
+          {
+            date -u +%FT%TZ
+            uname -a
+            cat /etc/os-release
+            printf 'cpu_count='; nproc
+            awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/ { print }' /proc/meminfo
+            df -B1 --output=source,size,used,avail,target / "$GITHUB_WORKSPACE"
+          } > diagnostic/host-before.txt
+          jq -n --arg image_os "${ImageOS:-}" --arg image_version "${ImageVersion:-}" \
+            --arg architecture "$RUNNER_ARCH" --arg run_id "$GITHUB_RUN_ID" --arg commit "$GITHUB_SHA" \
+            '{image_os:$image_os,image_version:$image_version,runner_arch:$architecture,run_id:$run_id,workflow_commit:$commit}' > diagnostic/runner-image.json
+          lsblk -b -J -o NAME,PATH,SIZE,TYPE,FSTYPE,MOUNTPOINTS,PKNAME,RO > diagnostic/lsblk-before.json
+          findmnt --json -o TARGET,SOURCE,FSTYPE,OPTIONS > diagnostic/findmnt-before.json
+          docker version --format '{{json .}}' > diagnostic/docker-version.json
+          docker info --format '{{json .}}' | jq '{ServerVersion,Architecture,OSType,OperatingSystem,Driver,DockerRootDir,Images,Containers,ContainersRunning,MemTotal,NCPU}' > diagnostic/docker-info.json
+          docker system df > diagnostic/docker-storage-before.txt
+
+      - name: Start the pinned official Alpine ARM64 container
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull --platform linux/arm64 "$ALPINE_IMAGE" > diagnostic/image-pull.txt 2>&1
+          docker image inspect "$ALPINE_IMAGE" | jq 'map({Id,RepoDigests,Architecture,Os,Size})' > diagnostic/image-identity.json
+          test "$(docker image inspect "$ALPINE_IMAGE" --format '{{.Id}}')" = "$ALPINE_IMAGE_ID"
+          test "$(docker image inspect "$ALPINE_IMAGE" --format '{{.Architecture}} {{.Os}}')" = 'arm64 linux'
+          docker run --detach --name "$PROBE_CONTAINER" --platform linux/arm64 \
+            "$ALPINE_IMAGE" /bin/sh -c 'while :; do sleep 3600; done' > diagnostic/container-id.txt
+          test "$(docker inspect "$PROBE_CONTAINER" --format '{{.State.Running}}')" = true
+          docker inspect "$PROBE_CONTAINER" --format '{{json .Config.Image}}' > diagnostic/container-image.json
+
+      - name: Free selected optional SDK caches only if the measured disk needs it
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(docker inspect "$PROBE_CONTAINER" --format '{{.State.Running}}')" = true
+          : > diagnostic/ephemeral-cleanup.jsonl
+          # This is a disposable hosted VM. Preserve Docker/containerd state,
+          # the Actions runtime, system Python, and all device/user data.
+          # Stop deleting as soon as the required workspace space is available.
+          for candidate in /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache /opt/az; do
+            available=$(df -B1 --output=avail "$GITHUB_WORKSPACE" | tail -n 1 | tr -d ' ')
+            if (( available >= MINIMUM_FREE_BYTES )); then
+              break
+            fi
+            if [[ ! -d "$candidate" || -L "$candidate" ]] || mountpoint -q "$candidate"; then
+              jq -nc --arg path "$candidate" '{path:$path,action:"skipped_missing_symlink_or_mount"}' >> diagnostic/ephemeral-cleanup.jsonl
+              continue
+            fi
+            test "$(realpath -e -- "$candidate")" = "$candidate"
+            before_kib=$(sudo du -sk -- "$candidate" | awk '{print $1}')
+            sudo rm -rf --one-file-system -- "$candidate"
+            test ! -e "$candidate"
+            after_available=$(df -B1 --output=avail "$GITHUB_WORKSPACE" | tail -n 1 | tr -d ' ')
+            jq -nc --arg path "$candidate" --argjson kib "$before_kib" \
+              --argjson before "$available" --argjson after "$after_available" \
+              '{path:$path,action:"removed_optional_preinstalled_tool",before_du_kib:$kib,workspace_available_before:$before,workspace_available_after:$after}' >> diagnostic/ephemeral-cleanup.jsonl
+          done
+          test "$(docker inspect "$PROBE_CONTAINER" --format '{{.State.Running}}')" = true
+          docker exec "$PROBE_CONTAINER" /bin/sh -c 'test "$(uname -m)" = aarch64; test "$(cat /etc/alpine-release)" = 3.24.4' > diagnostic/container-after-cleanup.txt 2>&1
+
+      - name: Verify the stable Alpine channel and native abuild toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > diagnostic/alpine-native-probe.sh <<'ALPINE_PROBE'
+          #!/bin/sh
+          set -eu
+          test "$(uname -m)" = aarch64
+          test "$(apk --print-arch)" = aarch64
+          test "$(cat /etc/alpine-release)" = 3.24.4
+          printf 'alpine_release='; cat /etc/alpine-release
+          printf 'kernel_arch='; uname -m
+          printf 'apk_arch='; apk --print-arch
+          cat /etc/apk/repositories
+          awk 'NF && $1 !~ /^#/ && $1 !~ /^https?:\/\/dl-cdn.alpinelinux.org\/alpine\/v3\.24\/(main|community)$/ { bad=1 } END { exit bad }' /etc/apk/repositories
+          sha256sum /etc/apk/repositories
+          apk update
+          apk policy abuild build-base
+          apk add --no-cache abuild build-base
+          command -v abuild
+          abuild -V
+          apk info -W /usr/bin/abuild
+          cc --version
+          cc -dumpmachine
+          mkdir -p /tmp/alpine-native-probe
+          printf '#include <stdio.h>\nint main(void) { puts("alpine-aarch64-native-toolchain-ok"); return 0; }\n' > /tmp/alpine-native-probe/probe.c
+          cc -O2 /tmp/alpine-native-probe/probe.c -o /tmp/alpine-native-probe/probe
+          readelf -h /tmp/alpine-native-probe/probe
+          /tmp/alpine-native-probe/probe
+          sha256sum /tmp/alpine-native-probe/probe
+          apk info -v | sort
+          printf '\nALPINE_NATIVE_PROBE_PASS\n'
+          ALPINE_PROBE
+          docker exec -i "$PROBE_CONTAINER" /bin/sh -s < diagnostic/alpine-native-probe.sh > diagnostic/alpine-native-toolchain.txt 2>&1
+          tail -n 1 diagnostic/alpine-native-toolchain.txt | grep -Fx ALPINE_NATIVE_PROBE_PASS
+
+      - name: Apply the measured 100 GB workspace guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            date -u +%FT%TZ
+            printf 'cpu_count='; nproc
+            awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/ { print }' /proc/meminfo
+            df -B1 --output=source,size,used,avail,target / "$GITHUB_WORKSPACE"
+          } > diagnostic/host-after.txt
+          lsblk -b -J -o NAME,PATH,SIZE,TYPE,FSTYPE,MOUNTPOINTS,PKNAME,RO > diagnostic/lsblk-after.json
+          findmnt --json -o TARGET,SOURCE,FSTYPE,OPTIONS > diagnostic/findmnt-after.json
+          for target in / /mnt "$GITHUB_WORKSPACE" "$RUNNER_TEMP"; do
+            if test -e "$target"; then
+              device=$(stat -L -c '%d' "$target")
+              read -r block_size total_blocks available_blocks < <(stat -L -f -c '%S %b %a' "$target")
+              jq -nc --arg path "$target" --argjson device "$device" --argjson unit "$block_size" --argjson total "$total_blocks" --argjson available "$available_blocks" \
+                '{path:$path,exists:true,device_id:$device,total_bytes:($unit*$total),available_bytes:($unit*$available)}'
+            else
+              jq -nc --arg path "$target" '{path:$path,exists:false}'
+            fi
+          done | jq -s '{filesystem_records:.,measurement:"GNU stat filesystem counters; device IDs are not additive",volumes_created_or_reconfigured:false}' > diagnostic/work-volumes.json
+          disk_available=$(df -B1 --output=avail "$GITHUB_WORKSPACE" | tail -n 1 | tr -d ' ')
+          memory_total=$(awk '/^MemTotal:/ { printf "%.0f", $2 * 1024 }' /proc/meminfo)
+          memory_available=$(awk '/^MemAvailable:/ { printf "%.0f", $2 * 1024 }' /proc/meminfo)
+          swap_total=$(awk '/^SwapTotal:/ { printf "%.0f", $2 * 1024 }' /proc/meminfo)
+          cpu_count=$(nproc)
+          jq -n --arg image "$ALPINE_IMAGE" --argjson disk "$disk_available" \
+            --argjson memory "$memory_total" --argjson available_memory "$memory_available" \
+            --argjson swap "$swap_total" --argjson cpu "$cpu_count" --argjson minimum "$MINIMUM_FREE_BYTES" \
+            '{alpine_image:$image,host_arch:"aarch64",container_arch:"aarch64",alpine_release:"3.24.4",abuild_installed_and_executed:true,native_c_compile_and_execution:true,workspace_available_bytes:$disk,memory_total_bytes:$memory,memory_available_bytes:$available_memory,swap_total_bytes:$swap,cpu_count:$cpu,minimum_workspace_bytes:$minimum,minimum_memory_bytes:8000000000,disk_guard:($disk >= $minimum),memory_guard:($memory >= 8000000000),environment_guard:($disk >= $minimum and $memory >= 8000000000),full_chromium_build_attempted:false,device_changes:false,repository_checkout:false}' > diagnostic/summary.json
+          cat diagnostic/summary.json
+          jq -e '.environment_guard' diagnostic/summary.json
+
+      - name: Remove only the job's diagnostic container
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostic
+          if docker container inspect "$PROBE_CONTAINER" >/dev/null 2>&1; then
+            docker inspect "$PROBE_CONTAINER" --format '{{json .State}}' > diagnostic/container-state-before-removal.json
+            docker rm --force "$PROBE_CONTAINER" > diagnostic/container-removal.txt
+            if docker container inspect "$PROBE_CONTAINER" >/dev/null 2>&1; then
+              exit 1
+            fi
+          fi
+
+      - name: Preserve the diagnostic receipt even when a guard fails
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: alpine-chromium158-arm-preflight-${{ github.run_id }}
+          path: diagnostic/
+          if-no-files-found: error
+          retention-days: 7
