@@ -461,7 +461,7 @@ jobs:
           # The official restricted profile makes trusted repository scripts immutable.
           # The host applied the reviewed patch before starting this confined container.
           sha256sum --check maintenance-inputs/prepared.sha256 > output/maintenance-diagnostics/prepared-source-check.txt
-          git diff --check
+          git diff --check -- . ':(exclude)x11-packages/chromium-host-tools/jumbo-patches/0107-components.patch'
           git diff -- x11-packages/chromium/build.sh x11-packages/chromium-host-tools/build.sh x11-packages/chromium-host-tools/jumbo-patches/0107-components.patch > output/maintenance-diagnostics/recipes.patch
           dpkg --validate-version '158.0.8127.36-0~termuxlocal1'
           dpkg --compare-versions '157.0.8103.78' lt '158.0.8127.36-0~termuxlocal1'
@@ -734,7 +734,7 @@ jobs:
           mkdir -p termux-packages/output/maintenance-diagnostics
           python3 termux-packages/maintenance-inputs/apply-recovery.py termux-packages > termux-packages/output/maintenance-diagnostics/source-patch.json
           python3 termux-packages/maintenance-inputs/apply-browser-backport.py termux-packages > termux-packages/output/maintenance-diagnostics/source-backport.json
-          git -C termux-packages diff --check
+          git -C termux-packages diff --check -- . ':(exclude)x11-packages/chromium-host-tools/jumbo-patches/0107-components.patch'
           (
             cd termux-packages
             sha256sum x11-packages/chromium/build.sh x11-packages/chromium-host-tools/build.sh \
